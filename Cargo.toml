@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/pezo-core", "crates/pezo-cli", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Dominikos Pritis <hey@myroomie.gr>"]
+
+[workspace.dependencies]
+pezo-core = { path = "crates/pezo-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.150"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+thiserror = "2.0.19"
+anyhow = "1.0.104"
+walkdir = "2.5.0"
+clap = { version = "4.6.2", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+strip = true
