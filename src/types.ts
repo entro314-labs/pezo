@@ -14,6 +14,7 @@ export type Runner = "proton" | "dosbox" | "scummvm";
 
 export interface AppConfig {
   library_root: string | null;
+  scan_dirs: string[];
 }
 
 export interface Candidate {

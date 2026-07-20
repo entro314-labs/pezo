@@ -33,6 +33,29 @@ pub fn set_library_root(path: String) -> CmdResult<Config> {
 }
 
 #[tauri::command]
+pub fn add_scan_dir(path: String) -> CmdResult<Config> {
+    let dir = PathBuf::from(path);
+    if !dir.is_dir() {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    let mut config = Config::load().map_err(err)?;
+    if config.library_root.as_deref() != Some(dir.as_path()) && !config.scan_dirs.contains(&dir) {
+        config.scan_dirs.push(dir);
+        config.save().map_err(err)?;
+    }
+    Ok(config)
+}
+
+#[tauri::command]
+pub fn remove_scan_dir(path: String) -> CmdResult<Config> {
+    let dir = PathBuf::from(path);
+    let mut config = Config::load().map_err(err)?;
+    config.scan_dirs.retain(|d| *d != dir);
+    config.save().map_err(err)?;
+    Ok(config)
+}
+
+#[tauri::command]
 pub fn doctor() -> Vec<ToolStatus> {
     pezo_core::deps::doctor()
 }
@@ -42,7 +65,7 @@ pub async fn scan_installers() -> CmdResult<ScanOutcome> {
     run_blocking(|| {
         let config = Config::load()?;
         let (paths, db) = open_library(&config)?;
-        scan::scan_dir(&db, &paths.installers)
+        scan::scan_library(&db, &paths, &config.scan_dirs)
     })
     .await
 }

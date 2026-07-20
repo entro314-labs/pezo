@@ -1,15 +1,28 @@
 use std::path::Path;
 
+/// File extensions that get stripped before humanizing. Anything else after a
+/// dot is part of the name itself (dotted release names, versions in folder
+/// names), which `file_stem` would wrongly chop.
+const STRIP_EXTS: &[&str] = &[
+    "exe", "msi", "zip", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "iso", "bin",
+];
+
 /// Turn a filesystem name like `setup_broken_sword_2.0.0.6_(28495).exe`
 /// into a human title like `Broken Sword`.
 pub fn humanize(path: &Path) -> String {
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    let has_known_ext = path
+        .extension()
+        .is_some_and(|e| STRIP_EXTS.contains(&e.to_string_lossy().to_lowercase().as_str()));
+    let stem = if has_known_ext {
+        path.file_stem()
+    } else {
+        path.file_name()
+    }
+    .map(|s| s.to_string_lossy().to_string())
+    .unwrap_or_else(|| path.to_string_lossy().to_string());
 
     let mut s = stem.to_lowercase();
-    for prefix in ["setup_", "setup-", "install_"] {
+    for prefix in ["setup_", "setup-", "install_", "game-"] {
         if let Some(rest) = s.strip_prefix(prefix) {
             s = rest.to_string();
         }
@@ -86,7 +99,23 @@ fn is_noise_token(w: &str) -> bool {
     {
         return true;
     }
-    matches!(w, "gog" | "galaxy" | "offline" | "backup" | "installer")
+    matches!(
+        w,
+        "gog"
+            | "galaxy"
+            | "offline"
+            | "backup"
+            | "installer"
+            | "win"
+            | "windows"
+            | "linux"
+            | "mac"
+            | "macos"
+            | "64bit"
+            | "32bit"
+            | "x64"
+            | "x86"
+    )
 }
 
 fn title_case_word(w: &str) -> String {
@@ -127,6 +156,38 @@ mod tests {
     fn humanizes_folders_and_archives() {
         assert_eq!(humanize(&PathBuf::from("Tyrian2000")), "Tyrian2000");
         assert_eq!(humanize(&PathBuf::from("fallout-2-v1.02.zip")), "Fallout");
+    }
+
+    #[test]
+    fn keeps_dots_in_extensionless_folder_names() {
+        assert_eq!(
+            humanize(&PathBuf::from("game-project.wingman-(78697)")),
+            "Project Wingman"
+        );
+        assert_eq!(
+            humanize(&PathBuf::from(
+                "game-song.of.nunu.a.league.of.legends.story-(69017)"
+            )),
+            "Song Of Nunu A League Of Legends Story"
+        );
+        assert_eq!(
+            humanize(&PathBuf::from("Alpha_Protocol_1.1_(71214)_win_gog")),
+            "Alpha Protocol"
+        );
+    }
+
+    #[test]
+    fn drops_platform_tokens() {
+        assert_eq!(
+            humanize(&PathBuf::from("paper_trail_windows_gog_(79715)")),
+            "Paper Trail"
+        );
+        assert_eq!(
+            humanize(&PathBuf::from(
+                "setup_creepy_tale_1.0.2d_(64bit)_(42424).exe"
+            )),
+            "Creepy Tale"
+        );
     }
 
     #[test]

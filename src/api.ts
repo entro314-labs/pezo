@@ -12,6 +12,8 @@ import type {
 export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   setLibraryRoot: (path: string) => invoke<AppConfig>("set_library_root", { path }),
+  addScanDir: (path: string) => invoke<AppConfig>("add_scan_dir", { path }),
+  removeScanDir: (path: string) => invoke<AppConfig>("remove_scan_dir", { path }),
   doctor: () => invoke<ToolStatus[]>("doctor"),
   scan: () => invoke<ScanOutcome>("scan_installers"),
   listCandidates: () => invoke<Candidate[]>("list_candidates"),

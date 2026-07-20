@@ -16,6 +16,10 @@ pub const PREFIXES_DIR: &str = "prefixes";
 pub struct Config {
     /// Root of the game library disk, e.g. `/mnt/games`.
     pub library_root: Option<PathBuf>,
+    /// Extra folders scanned for installers, e.g. other disks. Unlike the
+    /// library root, nothing is installed to or written in these.
+    #[serde(default)]
+    pub scan_dirs: Vec<PathBuf>,
 }
 
 impl Config {

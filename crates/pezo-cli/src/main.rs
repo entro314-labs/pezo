@@ -115,8 +115,16 @@ fn cmd_doctor() -> anyhow::Result<()> {
 fn cmd_scan(dir: Option<PathBuf>) -> anyhow::Result<()> {
     let config = Config::load()?;
     let (paths, db) = open_library(&config)?;
-    let target = dir.unwrap_or(paths.installers.clone());
-    let outcome = scan::scan_dir(&db, &target)?;
+    let (target, outcome) = match dir {
+        Some(dir) => {
+            let outcome = scan::scan_dir(&db, &dir)?;
+            (dir, outcome)
+        }
+        None => {
+            let outcome = scan::scan_library(&db, &paths, &config.scan_dirs)?;
+            (paths.root.clone(), outcome)
+        }
+    };
     println!(
         "scanned {}: {} candidates, {} ignored, {} pruned",
         target.display(),
