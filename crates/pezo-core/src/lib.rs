@@ -7,8 +7,10 @@
 
 pub mod classify;
 pub mod config;
+pub mod covers;
 pub mod db;
 pub mod deps;
+pub mod desktop;
 pub mod error;
 pub mod install;
 pub mod launch;
@@ -16,10 +18,10 @@ pub mod model;
 pub mod naming;
 pub mod scan;
 
-pub use config::{Config, LibraryPaths};
+pub use config::{Config, FsInfo, LibraryPaths};
 pub use db::Db;
 pub use error::{CoreError, Result};
-pub use model::{Candidate, CandidateKind, Game, Runner};
+pub use model::{Candidate, CandidateKind, Game, NewGame, Runner};
 
 /// Open the library database for the configured library root, ensuring the
 /// on-disk layout exists.

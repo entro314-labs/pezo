@@ -1,4 +1,7 @@
-export type Tab = "library" | "discoveries" | "setup";
+import type { ReactNode } from "react";
+import { IconCompass, IconGear, IconLibrary } from "./Icons";
+
+export type Tab = "library" | "discoveries" | "settings";
 
 interface Props {
   tab: Tab;
@@ -8,22 +11,16 @@ interface Props {
   missingRequiredTools: boolean;
 }
 
-const ITEMS: { key: Tab; label: string; icon: string }[] = [
-  { key: "library", label: "Library", icon: "▦" },
-  { key: "discoveries", label: "Discoveries", icon: "◎" },
-  { key: "setup", label: "Setup", icon: "⚙" },
+const ITEMS: { key: Tab; label: string; icon: ReactNode }[] = [
+  { key: "library", label: "Library", icon: <IconLibrary /> },
+  { key: "discoveries", label: "Discoveries", icon: <IconCompass /> },
+  { key: "settings", label: "Settings", icon: <IconGear /> },
 ];
 
 export function Sidebar({ tab, onTab, gameCount, candidateCount, missingRequiredTools }: Props) {
   return (
-    <aside className="flex w-56 shrink-0 flex-col border-r border-ink-800 bg-ink-900">
-      <div className="flex items-center gap-2 px-5 py-5">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-600 text-sm font-bold text-white">
-          ▶
-        </div>
-        <span className="text-lg font-semibold tracking-tight text-white">Pezo</span>
-      </div>
-      <nav className="flex flex-col gap-1 px-3">
+    <aside className="flex w-44 shrink-0 flex-col border-r border-edge bg-surface pt-2">
+      <nav className="flex flex-col gap-0.5 px-2">
         {ITEMS.map((item) => {
           const active = tab === item.key;
           const badge =
@@ -36,30 +33,25 @@ export function Sidebar({ tab, onTab, gameCount, candidateCount, missingRequired
             <button
               key={item.key}
               onClick={() => onTab(item.key)}
-              className={`flex items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors ${
-                active
-                  ? "bg-ink-700 text-white"
-                  : "text-zinc-400 hover:bg-ink-800 hover:text-zinc-200"
+              className={`relative flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors ${
+                active ? "bg-accent-soft font-medium text-t1" : "text-t2 hover:bg-raised hover:text-t1"
               }`}
             >
-              <span className="flex items-center gap-2.5">
-                <span className="text-base leading-none">{item.icon}</span>
-                {item.label}
-                {item.key === "setup" && missingRequiredTools && (
-                  <span className="h-2 w-2 rounded-full bg-amber-400" title="Missing tools" />
-                )}
-              </span>
-              {badge > 0 && (
-                <span className="rounded-full bg-ink-950 px-2 py-0.5 text-xs text-zinc-400">
-                  {badge}
-                </span>
+              {active && (
+                <span className="absolute top-1/2 left-0 h-4 w-0.5 -translate-y-1/2 rounded-full bg-accent" />
               )}
+              <span className={active ? "text-accent" : "text-t3"}>{item.icon}</span>
+              <span className="flex-1">{item.label}</span>
+              {item.key === "settings" && missingRequiredTools && (
+                <span className="h-1.5 w-1.5 rounded-full bg-warn" title="Missing tools" />
+              )}
+              {badge > 0 && <span className="text-[11px] text-t3">{badge}</span>}
             </button>
           );
         })}
       </nav>
-      <div className="mt-auto px-5 py-4 text-xs text-zinc-600">
-        GOG installers · abandonware · DOS
+      <div className="mt-auto px-4 py-3">
+        <p className="eyebrow">GOG · DOS · Abandonware</p>
       </div>
     </aside>
   );

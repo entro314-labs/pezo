@@ -1,6 +1,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import "@fontsource-variable/outfit";
+import "@fontsource-variable/inter";
 import "./styles.css";
 
 const rootEl = document.getElementById("root");

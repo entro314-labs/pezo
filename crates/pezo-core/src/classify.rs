@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
@@ -21,6 +21,137 @@ pub enum Classification {
     Ignore,
 }
 
+/// Role of a file in a split archive set (`x.part2.rar`, `x.7z.002`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultipartRole {
+    /// First part — stands in for the whole set as one candidate.
+    Head,
+    /// Continuation part — never a candidate of its own.
+    Tail,
+}
+
+/// Detect split-archive naming: `x.partN.rar` or `x.<archive-ext>.NNN`.
+pub fn multipart_role(name: &str) -> Option<MultipartRole> {
+    let lower = name.to_ascii_lowercase();
+    if let Some(stem) = lower.strip_suffix(".rar") {
+        if let Some(idx) = stem.rfind(".part") {
+            let digits = &stem[idx + 5..];
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                return Some(if digits.trim_start_matches('0') == "1" {
+                    MultipartRole::Head
+                } else {
+                    MultipartRole::Tail
+                });
+            }
+        }
+        return None;
+    }
+    if let Some((stem, digits)) = lower.rsplit_once('.') {
+        if digits.len() == 3
+            && digits.chars().all(|c| c.is_ascii_digit())
+            && stem
+                .rsplit_once('.')
+                .is_some_and(|(_, ext)| ARCHIVE_EXTS.contains(&ext))
+        {
+            return Some(if digits == "001" {
+                MultipartRole::Head
+            } else {
+                MultipartRole::Tail
+            });
+        }
+    }
+    None
+}
+
+/// All on-disk parts of a split archive, in order, given any part of it.
+/// Returns just `path` itself for single-file archives.
+pub fn multipart_parts(path: &Path) -> Vec<PathBuf> {
+    let Some(parent) = path.parent() else {
+        return vec![path.to_path_buf()];
+    };
+    let name = file_name_lower(path);
+    // Byte length is stable under to_ascii_lowercase, so index math is safe.
+    let base_len = if let Some(stem) = name.strip_suffix(".rar") {
+        match stem.rfind(".part") {
+            Some(idx) if stem[idx + 5..].chars().all(|c| c.is_ascii_digit()) => idx,
+            _ => return vec![path.to_path_buf()],
+        }
+    } else if multipart_role(&name).is_some() {
+        name.rfind('.').unwrap_or(name.len())
+    } else {
+        return vec![path.to_path_buf()];
+    };
+    let base = &name[..base_len];
+
+    let Ok(entries) = fs::read_dir(parent) else {
+        return vec![path.to_path_buf()];
+    };
+    let mut parts: Vec<(u32, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter_map(|p| {
+            let n = file_name_lower(&p);
+            let number = part_number(&n, base)?;
+            Some((number, p))
+        })
+        .collect();
+    parts.sort();
+    if parts.is_empty() {
+        vec![path.to_path_buf()]
+    } else {
+        parts.into_iter().map(|(_, p)| p).collect()
+    }
+}
+
+/// Part number of `name` if it belongs to the multipart set with prefix `base`.
+fn part_number(name: &str, base: &str) -> Option<u32> {
+    let rest = name.strip_prefix(base)?;
+    if let Some(digits) = rest.strip_prefix(".part").and_then(|r| r.strip_suffix(".rar")) {
+        return digits.parse().ok();
+    }
+    rest.strip_prefix('.')
+        .filter(|d| d.len() == 3)
+        .and_then(|d| d.parse().ok())
+}
+
+/// Part numbers missing from a multipart set (gaps before the last part).
+pub fn multipart_gaps(head: &Path) -> Vec<u32> {
+    let numbers: Vec<u32> = multipart_parts(head)
+        .iter()
+        .filter_map(|p| {
+            let n = file_name_lower(p);
+            let base_end = if n.ends_with(".rar") {
+                n.rfind(".part")
+            } else {
+                n.rfind('.')
+            }?;
+            part_number(&n, &n[..base_end])
+        })
+        .collect();
+    match numbers.iter().max() {
+        Some(&max) => (1..=max).filter(|n| !numbers.contains(n)).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Downloader debris that should never drive classification: saved web pages,
+/// scraper metadata, cover art, checksums, torrents.
+pub fn is_junk_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    // Saved-webpage asset folders ("Page Title_files/").
+    if lower.ends_with("_files") {
+        return true;
+    }
+    let Some((stem, ext)) = lower.rsplit_once('.') else {
+        return false;
+    };
+    const JUNK_EXTS: &[&str] = &[
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "html", "htm", "mhtml", "pdf", "txt",
+        "nfo", "diz", "url", "torrent", "sha1", "md5", "sfv", "json", "xml", "sqlite", "srt",
+    ];
+    JUNK_EXTS.contains(&ext) || stem.ends_with("_meta")
+}
+
 /// Classify a top-level entry of the installers directory (file or folder).
 pub fn classify(path: &Path) -> Result<Classification> {
     let name = file_name_lower(path);
@@ -30,6 +161,12 @@ pub fn classify(path: &Path) -> Result<Classification> {
 
     if path.is_dir() {
         return classify_dir(path);
+    }
+
+    match multipart_role(&name) {
+        Some(MultipartRole::Head) => return Ok(Classification::Candidate(CandidateKind::Archive)),
+        Some(MultipartRole::Tail) => return Ok(Classification::Ignore),
+        None => {}
     }
 
     let ext = extension_lower(path);
@@ -96,7 +233,75 @@ pub fn classify_dir(dir: &Path) -> Result<Classification> {
     if has_exe {
         return Ok(Classification::Candidate(CandidateKind::PortableWindows));
     }
+    // Steam library rips keep the game under steamapps/common/<Game>/, one
+    // level deeper than the walk above reaches.
+    if steam_common_dir(dir).is_some_and(|common| dir_has_exe(&common, 4)) {
+        return Ok(Classification::Candidate(CandidateKind::PortableWindows));
+    }
+    // Downloaded rips often wrap one archive in a folder of covers/metadata.
+    if find_inner_archive(dir).is_some() {
+        return Ok(Classification::Candidate(CandidateKind::Archive));
+    }
     Ok(Classification::Candidate(CandidateKind::Unknown))
+}
+
+/// `<dir>/steamapps/common` if present (Steam library rips).
+pub fn steam_common_dir(dir: &Path) -> Option<PathBuf> {
+    let common = dir.join("steamapps").join("common");
+    common.is_dir().then_some(common)
+}
+
+fn dir_has_exe(dir: &Path, depth: usize) -> bool {
+    WalkDir::new(dir)
+        .max_depth(depth)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_type().is_file()
+                && e.file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .ends_with(".exe")
+        })
+}
+
+/// The meaningful archives at the top level of a folder, once junk (covers,
+/// saved pages, metadata) and multipart tails are set aside. Multipart sets
+/// appear once, as their head.
+pub fn list_dir_archives(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut archives = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = file_name_lower(&path);
+        if name.starts_with('.') || is_junk_name(&name) || path.is_dir() {
+            continue;
+        }
+        match multipart_role(&name) {
+            Some(MultipartRole::Head) => archives.push(path),
+            Some(MultipartRole::Tail) => {}
+            None => {
+                if ARCHIVE_EXTS.contains(&extension_lower(&path).as_str()) {
+                    archives.push(path);
+                }
+            }
+        }
+    }
+    archives.sort();
+    archives
+}
+
+/// The single meaningful archive inside a wrapper folder. None if the folder
+/// holds zero or several archives — several is ambiguous (disc sets), so the
+/// folder stays unclassified rather than guessing.
+pub fn find_inner_archive(dir: &Path) -> Option<PathBuf> {
+    match list_dir_archives(dir).as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
 }
 
 /// Find the setup exe inside a directory (used for folder-wrapped installers).
@@ -218,6 +423,93 @@ mod tests {
         let hidden = dir.path().join(".DS_Store");
         touch(&hidden, b"junk");
         assert_eq!(classify(&hidden).expect("classify"), Classification::Ignore);
+    }
+
+    #[test]
+    fn multipart_heads_are_candidates_tails_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let head = dir.path().join("game.part1.rar");
+        let tail = dir.path().join("game.part2.rar");
+        touch(&head, b"Rar!");
+        touch(&tail, b"Rar!");
+        assert_eq!(
+            classify(&head).expect("classify"),
+            Classification::Candidate(CandidateKind::Archive)
+        );
+        assert_eq!(classify(&tail).expect("classify"), Classification::Ignore);
+
+        let head7z = dir.path().join("other.7z.001");
+        let tail7z = dir.path().join("other.7z.002");
+        touch(&head7z, b"7z");
+        touch(&tail7z, b"7z");
+        assert_eq!(
+            classify(&head7z).expect("classify"),
+            Classification::Candidate(CandidateKind::Archive)
+        );
+        assert_eq!(classify(&tail7z).expect("classify"), Classification::Ignore);
+    }
+
+    #[test]
+    fn multipart_parts_and_gaps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for n in [1, 2, 4] {
+            touch(&dir.path().join(format!("game.7z.{n:03}")), b"7z");
+        }
+        let head = dir.path().join("game.7z.001");
+        assert_eq!(multipart_parts(&head).len(), 3);
+        assert_eq!(multipart_gaps(&head), vec![3]);
+
+        let single = dir.path().join("whole.zip");
+        touch(&single, b"PK");
+        assert_eq!(multipart_parts(&single), vec![single.clone()]);
+        assert!(multipart_gaps(&single).is_empty());
+    }
+
+    #[test]
+    fn classifies_steam_library_rip_as_portable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let game = dir.path().join("SomeRip");
+        touch(
+            &game
+                .join("steamapps")
+                .join("common")
+                .join("The Game")
+                .join("game.exe"),
+            b"MZ",
+        );
+        touch(&game.join("steamapps").join("appmanifest_1.acf"), b"{}");
+        assert_eq!(
+            classify(&game).expect("classify"),
+            Classification::Candidate(CandidateKind::PortableWindows)
+        );
+    }
+
+    #[test]
+    fn classifies_folder_wrapping_single_archive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rip = dir.path().join("Some Old Game (USA) PC");
+        touch(&rip.join("Some Old Game.7z"), b"7z");
+        touch(&rip.join("box1.jpg"), b"img");
+        touch(&rip.join("someoldgame_meta.xml"), b"<x/>");
+        touch(&rip.join("someoldgame_meta.sqlite"), b"db");
+        touch(&rip.join("Page Download - Site.html"), b"<html>");
+        assert_eq!(
+            classify(&rip).expect("classify"),
+            Classification::Candidate(CandidateKind::Archive)
+        );
+        assert_eq!(
+            find_inner_archive(&rip),
+            Some(rip.join("Some Old Game.7z"))
+        );
+
+        // Several archives (disc sets) stay unclassified rather than guessing.
+        let discs = dir.path().join("Disc Set");
+        touch(&discs.join("Disc 1.zip"), b"PK");
+        touch(&discs.join("Disc 2.zip"), b"PK");
+        assert_eq!(
+            classify(&discs).expect("classify"),
+            Classification::Candidate(CandidateKind::Unknown)
+        );
     }
 
     #[test]

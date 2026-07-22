@@ -1,6 +1,4 @@
 packages:
   - "."
 
-overrides:
-  postcss: 8.5.19
 minimumReleaseAge: 0

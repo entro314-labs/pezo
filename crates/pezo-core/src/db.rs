@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{CoreError, Result};
-use crate::model::{Candidate, CandidateKind, Game, Runner};
+use crate::model::{Candidate, CandidateKind, Game, NewGame, Runner};
 
 /// SQLite-backed library database. Lives on the library disk (`<root>/pezo.db`)
 /// so the library is self-contained and portable.
@@ -58,6 +58,24 @@ impl Db {
                 "#,
             )?;
         }
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 2 {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE candidates ADD COLUMN mtime INTEGER;
+
+                ALTER TABLE games ADD COLUMN store_id TEXT;
+                ALTER TABLE games ADD COLUMN store TEXT;
+                ALTER TABLE games ADD COLUMN launch_args TEXT NOT NULL DEFAULT '';
+                ALTER TABLE games ADD COLUMN env_vars TEXT NOT NULL DEFAULT '';
+                ALTER TABLE games ADD COLUMN wrappers TEXT NOT NULL DEFAULT '';
+
+                PRAGMA user_version = 2;
+                "#,
+            )?;
+        }
         Ok(())
     }
 
@@ -69,26 +87,42 @@ impl Db {
         kind: CandidateKind,
         display_name: &str,
         size_bytes: u64,
+        mtime: Option<i64>,
     ) -> Result<i64> {
         let id: i64 = self.conn.query_row(
             r#"
-            INSERT INTO candidates (path, kind, display_name, size_bytes)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO candidates (path, kind, display_name, size_bytes, mtime)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(path) DO UPDATE SET
                 kind = excluded.kind,
                 display_name = excluded.display_name,
-                size_bytes = excluded.size_bytes
+                size_bytes = excluded.size_bytes,
+                mtime = excluded.mtime
             RETURNING id
             "#,
             params![
                 path_str(path)?,
                 kind.as_str(),
                 display_name,
-                size_bytes as i64
+                size_bytes as i64,
+                mtime
             ],
             |r| r.get(0),
         )?;
         Ok(id)
+    }
+
+    /// Stored id + scan-time modification stamp for a path, if it's a known
+    /// candidate. Drives incremental rescans.
+    pub fn candidate_meta(&self, path: &Path) -> Result<Option<(i64, Option<i64>)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, mtime FROM candidates WHERE path = ?1",
+                params![path_str(path)?],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     /// Remove candidates under `scope` whose paths were not seen in the latest
@@ -150,41 +184,53 @@ impl Db {
 
     // ---- games ----
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_game(
-        &self,
-        slug: &str,
-        title: &str,
-        runner: Runner,
-        install_path: &Path,
-        launch_path: &Path,
-        prefix_path: Option<&Path>,
-        source_path: Option<&Path>,
-    ) -> Result<Game> {
+    pub fn insert_game(&self, new: &NewGame<'_>) -> Result<Game> {
         let id: i64 = self.conn.query_row(
             r#"
-            INSERT INTO games (slug, title, runner, install_path, launch_path, prefix_path, source_path)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO games (slug, title, runner, install_path, launch_path,
+                               prefix_path, source_path, store_id, store)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             RETURNING id
             "#,
             params![
-                slug,
-                title,
-                runner.as_str(),
-                path_str(install_path)?,
-                path_str(launch_path)?,
-                prefix_path.map(path_str).transpose()?,
-                source_path.map(path_str).transpose()?,
+                new.slug,
+                new.title,
+                new.runner.as_str(),
+                path_str(new.install_path)?,
+                path_str(new.launch_path)?,
+                new.prefix_path.map(path_str).transpose()?,
+                new.source_path.map(path_str).transpose()?,
+                new.store_id,
+                new.store,
             ],
             |r| r.get(0),
         )?;
         self.get_game(id)
     }
 
+    /// Update per-game launch customization (args, env lines, wrapper list).
+    pub fn update_launch_options(
+        &self,
+        game_id: i64,
+        launch_args: &str,
+        env_vars: &str,
+        wrappers: &str,
+    ) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE games SET launch_args = ?2, env_vars = ?3, wrappers = ?4 WHERE id = ?1",
+            params![game_id, launch_args, env_vars, wrappers],
+        )?;
+        if n == 0 {
+            return Err(CoreError::NotFound(format!("game {game_id}")));
+        }
+        Ok(())
+    }
+
     pub fn list_games(&self) -> Result<Vec<Game>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, slug, title, runner, install_path, launch_path, prefix_path,
-                    source_path, added_at, last_played_at, play_seconds
+                    source_path, added_at, last_played_at, play_seconds,
+                    store_id, store, launch_args, env_vars, wrappers
              FROM games ORDER BY title COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], row_to_game)?;
@@ -199,7 +245,8 @@ impl Db {
         self.conn
             .query_row(
                 "SELECT id, slug, title, runner, install_path, launch_path, prefix_path,
-                        source_path, added_at, last_played_at, play_seconds
+                        source_path, added_at, last_played_at, play_seconds,
+                        store_id, store, launch_args, env_vars, wrappers
                  FROM games WHERE id = ?1",
                 params![id],
                 row_to_game,
@@ -213,7 +260,8 @@ impl Db {
             .conn
             .query_row(
                 "SELECT id, slug, title, runner, install_path, launch_path, prefix_path,
-                        source_path, added_at, last_played_at, play_seconds
+                        source_path, added_at, last_played_at, play_seconds,
+                        store_id, store, launch_args, env_vars, wrappers
                  FROM games WHERE slug = ?1",
                 params![slug],
                 row_to_game,
@@ -292,5 +340,10 @@ fn row_to_game(r: &rusqlite::Row<'_>) -> rusqlite::Result<Game> {
         added_at: r.get(8)?,
         last_played_at: r.get(9)?,
         play_seconds: r.get(10)?,
+        store_id: r.get(11)?,
+        store: r.get(12)?,
+        launch_args: r.get(13)?,
+        env_vars: r.get(14)?,
+        wrappers: r.get(15)?,
     })
 }

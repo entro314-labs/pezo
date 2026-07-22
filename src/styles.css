@@ -1,22 +1,229 @@
 @import "tailwindcss";
 
-@theme {
-  --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
-  --color-ink-950: #0a0a0f;
-  --color-ink-900: #12121a;
-  --color-ink-800: #1a1a26;
-  --color-ink-700: #262636;
-  --color-accent-400: #a78bfa;
-  --color-accent-500: #8b5cf6;
-  --color-accent-600: #7c3aed;
+/*
+ * Pezo's visual identity: a lamplit archive. Warm near-black surfaces, warm
+ * grey-brown text ramp, one signature color — amber phosphor, straight off
+ * the DOS-era monitors this library preserves.
+ *
+ * This is a desktop application, not a web page: fixed chrome (headerbar,
+ * sidebar, statusbar), dense 13px controls, default cursor on buttons,
+ * selection instead of hover-cards, and only content panes scroll.
+ */
+:root {
+  --bg: #0e0c0a;
+  --surface: #16130f;
+  --raised: #1e1a15;
+  --hover: #272119;
+  --edge: #292319;
+  --edge-strong: #3b3325;
+  --t1: #f2ece2;
+  --t2: #b3a898;
+  --t3: #7a7060;
+  --accent: #f5a83c;
+  --accent-hover: #ffbe5c;
+  --accent-soft: rgba(245, 168, 60, 0.13);
+  --on-accent: #1a1206;
+  --danger: #ef6351;
+  --danger-soft: rgba(239, 99, 81, 0.12);
+  --ok: #8fc97d;
+  --warn: #e0c341;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 8px 28px rgba(0, 0, 0, 0.45);
+  --glow: 0 0 0 1px rgba(245, 168, 60, 0.45), 0 4px 24px rgba(245, 168, 60, 0.22),
+    0 12px 40px rgba(0, 0, 0, 0.6);
+}
+
+@theme inline {
+  --font-sans: "Inter Variable", "Inter", "Cantarell", system-ui, sans-serif;
+  --font-display: "Outfit Variable", "Outfit", "Inter Variable", system-ui, sans-serif;
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-hover: var(--hover);
+  --color-edge: var(--edge);
+  --color-edge-strong: var(--edge-strong);
+  --color-t1: var(--t1);
+  --color-t2: var(--t2);
+  --color-t3: var(--t3);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
 }
 
 html,
 body,
 #root {
   height: 100%;
+  overflow: hidden;
 }
 
 body {
-  @apply bg-ink-950 text-zinc-200 antialiased select-none;
+  @apply bg-bg text-t1 antialiased select-none;
+  font-size: 13px;
+}
+
+/* Desktop apps use the arrow cursor on controls; pointer is a hyperlink thing. */
+button,
+select,
+label,
+input[type="checkbox"] {
+  cursor: default;
+}
+
+/* Native-feeling scrollbars. */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--edge-strong);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4d4331;
+  background-clip: padding-box;
+  border: 3px solid transparent;
+}
+
+h1,
+h2,
+h3,
+.display {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+/* Signature: the wordmark's phosphor cursor. */
+.wordmark {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--t1);
+}
+.wordmark::after {
+  content: "_";
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(245, 168, 60, 0.8);
+  animation: cursor-blink 1.2s steps(1) infinite;
+}
+@keyframes cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wordmark::after {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+/* Cover tiles: quiet at rest, warm glow when addressed. */
+.tile {
+  @apply overflow-hidden rounded-md border border-edge bg-surface text-left transition-all duration-150;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.tile:hover,
+.tile:focus-visible {
+  transform: translateY(-2px);
+  border-color: rgba(245, 168, 60, 0.4);
+  box-shadow: var(--glow);
+}
+
+@layer components {
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-ghost,
+  .btn-danger {
+    @apply inline-flex h-7 items-center justify-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors disabled:pointer-events-none disabled:opacity-50;
+    font-family: var(--font-display);
+  }
+  .btn-primary {
+    @apply bg-accent text-on-accent hover:bg-accent-hover;
+    font-weight: 600;
+  }
+  .btn-secondary {
+    @apply border border-edge-strong bg-raised text-t1 hover:bg-hover;
+  }
+  .btn-ghost {
+    @apply text-t2 hover:bg-raised hover:text-t1;
+  }
+  .btn-danger {
+    @apply bg-danger-soft text-danger hover:bg-danger;
+  }
+  .btn-danger:hover {
+    color: #1a0c09;
+  }
+  .card {
+    @apply rounded-lg border border-edge bg-surface;
+  }
+  .input {
+    @apply h-7 rounded-md border border-edge bg-raised px-2.5 text-[13px] text-t1 outline-none placeholder:text-t3 focus:border-accent;
+  }
+  .chip {
+    @apply inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap;
+  }
+  .eyebrow {
+    @apply text-[10px] font-semibold tracking-widest text-t3 uppercase;
+    font-family: var(--font-display);
+  }
+  /* Fixed chrome pieces. */
+  .headerbar {
+    @apply flex h-11 shrink-0 items-center gap-2 border-b border-edge bg-surface px-2;
+  }
+  .toolbar {
+    @apply flex h-10 shrink-0 items-center gap-2 border-b border-edge bg-bg px-3;
+  }
+  .statusbar {
+    @apply flex h-6 shrink-0 items-center gap-4 border-t border-edge bg-surface px-3 text-[11px] text-t3;
+  }
+  .win-btn {
+    @apply flex h-6 w-6 items-center justify-center rounded-full text-t2 hover:bg-hover hover:text-t1;
+  }
+  /* Dense list rows with a real selection model. */
+  .row {
+    @apply cursor-default border-b border-edge text-[13px] last:border-0;
+  }
+  .row:hover {
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .row-selected,
+  .row-selected:hover {
+    background: var(--accent-soft);
+  }
+  .menu {
+    @apply fixed z-50 min-w-44 rounded-lg border border-edge-strong bg-raised py-1;
+    box-shadow: var(--shadow);
+  }
+  .menu-item {
+    @apply flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-t1;
+  }
+  .menu-item:hover {
+    background: var(--accent-soft);
+  }
+  .menu-item[data-danger]:hover {
+    background: var(--danger-soft);
+    color: var(--danger);
+  }
+  .menu-sep {
+    @apply my-1 border-t border-edge;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }

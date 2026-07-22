@@ -28,6 +28,9 @@ enum Cmd {
     Scan {
         /// Directory to scan (defaults to <library>/installers)
         dir: Option<PathBuf>,
+        /// Re-classify everything instead of skipping unchanged entries
+        #[arg(long)]
+        full: bool,
     },
     /// List scanned, installable items
     Candidates,
@@ -57,7 +60,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Cmd::Init { path } => cmd_init(path),
         Cmd::Doctor => cmd_doctor(),
-        Cmd::Scan { dir } => cmd_scan(dir),
+        Cmd::Scan { dir, full } => cmd_scan(dir, full),
         Cmd::Candidates => cmd_candidates(),
         Cmd::Install { candidate_id } => cmd_install(candidate_id),
         Cmd::Games => cmd_games(),
@@ -112,16 +115,20 @@ fn cmd_doctor() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_scan(dir: Option<PathBuf>) -> anyhow::Result<()> {
+fn cmd_scan(dir: Option<PathBuf>, full: bool) -> anyhow::Result<()> {
     let config = Config::load()?;
     let (paths, db) = open_library(&config)?;
+    let opts = scan::ScanOptions {
+        full,
+        progress: None,
+    };
     let (target, outcome) = match dir {
         Some(dir) => {
-            let outcome = scan::scan_dir(&db, &dir)?;
+            let outcome = scan::scan_dir(&db, &dir, &opts)?;
             (dir, outcome)
         }
         None => {
-            let outcome = scan::scan_library(&db, &paths, &config.scan_dirs)?;
+            let outcome = scan::scan_library(&db, &paths, &config.scan_dirs, &opts)?;
             (paths.root.clone(), outcome)
         }
     };
@@ -132,6 +139,9 @@ fn cmd_scan(dir: Option<PathBuf>) -> anyhow::Result<()> {
         outcome.ignored,
         outcome.pruned
     );
+    for dir in &outcome.offline {
+        println!("  offline: {} (skipped, entries kept)", dir.display());
+    }
     for c in &outcome.discovered {
         println!(
             "  #{:<4} {:<18} {:>9}  {}",
@@ -172,7 +182,11 @@ fn cmd_candidates() -> anyhow::Result<()> {
 fn cmd_install(candidate_id: i64) -> anyhow::Result<()> {
     let config = Config::load()?;
     let (paths, db) = open_library(&config)?;
-    let game = install::install_candidate(&db, &paths, candidate_id)?;
+    let opts = install::InstallOptions {
+        adopt_portables: config.adopt_portables,
+        progress: Some(&|stage| println!("… {}", stage.as_str())),
+    };
+    let game = install::install_candidate(&db, &paths, candidate_id, &opts)?;
     println!(
         "installed `{}` (#{}) — runner: {}, launch: {}",
         game.title,
@@ -238,6 +252,15 @@ fn cmd_config() -> anyhow::Result<()> {
     let config = Config::load()?;
     println!("config file: {}", Config::path()?.display());
     println!("{}", serde_json::to_string_pretty(&config)?);
+    if let Some(root) = &config.library_root
+        && let Some(fs) = pezo_core::config::fs_info(root)
+    {
+        print!("library filesystem: {}", fs.fstype);
+        if fs.problematic {
+            print!(" — WARNING: Proton/Wine prefixes misbehave on this filesystem");
+        }
+        println!();
+    }
     Ok(())
 }
 

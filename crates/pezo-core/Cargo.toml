@@ -13,6 +13,8 @@ rusqlite.workspace = true
 thiserror.workspace = true
 walkdir.workspace = true
 tracing.workspace = true
+rayon.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

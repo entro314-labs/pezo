@@ -118,4 +118,29 @@ pub struct Game {
     pub added_at: String,
     pub last_played_at: Option<String>,
     pub play_seconds: i64,
+    /// Store-specific game id for umu's protonfixes (e.g. GOG product id,
+    /// Steam appid). None → generic `umu-<slug>` handling.
+    pub store_id: Option<String>,
+    /// Which store the id belongs to ("gog", "steam"), for umu's STORE env.
+    pub store: Option<String>,
+    /// Extra command-line arguments appended at launch.
+    pub launch_args: String,
+    /// Extra environment, one KEY=VALUE per line.
+    pub env_vars: String,
+    /// Comma-separated launch wrappers ("gamemode", "mangohud").
+    pub wrappers: String,
+}
+
+/// Fields required to register a new game.
+#[derive(Debug, Clone)]
+pub struct NewGame<'a> {
+    pub slug: &'a str,
+    pub title: &'a str,
+    pub runner: Runner,
+    pub install_path: &'a std::path::Path,
+    pub launch_path: &'a std::path::Path,
+    pub prefix_path: Option<&'a std::path::Path>,
+    pub source_path: Option<&'a std::path::Path>,
+    pub store_id: Option<String>,
+    pub store: Option<&'a str>,
 }

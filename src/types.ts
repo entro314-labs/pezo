@@ -15,6 +15,18 @@ export type Runner = "proton" | "dosbox" | "scummvm";
 export interface AppConfig {
   library_root: string | null;
   scan_dirs: string[];
+  adopt_portables: boolean;
+}
+
+export interface FsInfo {
+  fstype: string;
+  problematic: boolean;
+}
+
+/** Window-button layout mirrored from GNOME settings. */
+export interface DesktopLayout {
+  left: string[];
+  right: string[];
 }
 
 export interface Candidate {
@@ -39,12 +51,40 @@ export interface Game {
   added_at: string;
   last_played_at: string | null;
   play_seconds: number;
+  store_id: string | null;
+  store: string | null;
+  launch_args: string;
+  env_vars: string;
+  wrappers: string;
 }
 
 export interface ScanOutcome {
   discovered: Candidate[];
   ignored: number;
   pruned: number;
+  /** Scan folders skipped because they're currently missing (unplugged disk). */
+  offline: string[];
+}
+
+export interface ScanProgress {
+  done: number;
+  total: number;
+}
+
+export type InstallStage = "extracting" | "copying" | "running-installer" | "registering";
+
+/** One entry in the sequential install queue. */
+export interface QueueTask {
+  id: number;
+  candidate_id: number;
+  title: string;
+  archive: string | null;
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  stage: InstallStage | null;
+  /** 0..1 while bytes are landing in the library and the total is known. */
+  progress: number | null;
+  error: string | null;
+  game_id: number | null;
 }
 
 export interface ToolStatus {
@@ -71,6 +111,13 @@ export const KIND_LABELS: Record<CandidateKind, string> = {
   "scummvm-game": "ScummVM",
   archive: "Archive",
   unknown: "Unknown",
+};
+
+export const STAGE_LABELS: Record<InstallStage, string> = {
+  extracting: "Extracting…",
+  copying: "Copying…",
+  "running-installer": "Installer running…",
+  registering: "Registering…",
 };
 
 export const RUNNER_LABELS: Record<Runner, string> = {

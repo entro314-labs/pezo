@@ -47,6 +47,20 @@ const TOOLS: &[ToolSpec] = &[
         required: false,
     },
     ToolSpec {
+        bins: &["7z", "7zz", "7za"],
+        name: "7-Zip",
+        purpose: "Extracts split archives (.part1.rar, .7z.001) and stubborn RARs",
+        hint: "Arch: pacman -S 7zip · Debian/Ubuntu: apt install 7zip · macOS: brew install sevenzip",
+        required: false,
+    },
+    ToolSpec {
+        bins: &["unrar"],
+        name: "unrar",
+        purpose: "Fallback extractor for RAR archives 7-Zip can't read",
+        hint: "Arch: pacman -S unrar · Debian/Ubuntu: apt install unrar",
+        required: false,
+    },
+    ToolSpec {
         bins: &["dosbox-staging", "dosbox"],
         name: "DOSBox",
         purpose: "Runs DOS-era games",
@@ -58,6 +72,27 @@ const TOOLS: &[ToolSpec] = &[
         name: "ScummVM",
         purpose: "Runs classic adventure-engine games",
         hint: "Arch: pacman -S scummvm · Debian/Ubuntu: apt install scummvm · macOS: brew install scummvm",
+        required: false,
+    },
+    ToolSpec {
+        bins: &["gamemoderun"],
+        name: "GameMode",
+        purpose: "CPU/GPU performance governor while a game runs (per-game toggle)",
+        hint: "Arch: pacman -S gamemode · Debian/Ubuntu: apt install gamemode",
+        required: false,
+    },
+    ToolSpec {
+        bins: &["mangohud"],
+        name: "MangoHud",
+        purpose: "FPS / frametime overlay (per-game toggle)",
+        hint: "Arch: pacman -S mangohud · Debian/Ubuntu: apt install mangohud",
+        required: false,
+    },
+    ToolSpec {
+        bins: &["winetricks"],
+        name: "winetricks",
+        purpose: "Installs runtimes (DXVK, fonts, VC++) into a game's prefix",
+        hint: "Arch: pacman -S winetricks · Debian/Ubuntu: apt install winetricks",
         required: false,
     },
 ];

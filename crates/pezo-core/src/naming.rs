@@ -7,19 +7,49 @@ const STRIP_EXTS: &[&str] = &[
     "exe", "msi", "zip", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "iso", "bin",
 ];
 
+/// Strip split-archive suffixes: `x.part1.rar` → `x`, `x.7z.001` → `x`.
+/// Byte indices are safe because to_ascii_lowercase preserves length.
+fn strip_multipart_suffix(name: &str) -> Option<&str> {
+    let lower = name.to_ascii_lowercase();
+    if let Some(stem) = lower.strip_suffix(".rar") {
+        let idx = stem.rfind(".part")?;
+        let digits = &stem[idx + 5..];
+        if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+            return Some(&name[..idx]);
+        }
+        return None;
+    }
+    let (stem, digits) = lower.rsplit_once('.')?;
+    let (base, ext) = stem.rsplit_once('.')?;
+    if digits.len() == 3
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && STRIP_EXTS.contains(&ext)
+    {
+        return Some(&name[..base.len()]);
+    }
+    None
+}
+
 /// Turn a filesystem name like `setup_broken_sword_2.0.0.6_(28495).exe`
 /// into a human title like `Broken Sword`.
 pub fn humanize(path: &Path) -> String {
-    let has_known_ext = path
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+    let stem = if let Some(base) = strip_multipart_suffix(&file_name) {
+        base.to_string()
+    } else if path
         .extension()
-        .is_some_and(|e| STRIP_EXTS.contains(&e.to_string_lossy().to_lowercase().as_str()));
-    let stem = if has_known_ext {
+        .is_some_and(|e| STRIP_EXTS.contains(&e.to_string_lossy().to_lowercase().as_str()))
+    {
         path.file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or(file_name)
     } else {
-        path.file_name()
-    }
-    .map(|s| s.to_string_lossy().to_string())
-    .unwrap_or_else(|| path.to_string_lossy().to_string());
+        file_name
+    };
 
     let mut s = stem.to_lowercase();
     for prefix in ["setup_", "setup-", "install_", "game-"] {
@@ -174,6 +204,16 @@ mod tests {
             humanize(&PathBuf::from("Alpha_Protocol_1.1_(71214)_win_gog")),
             "Alpha Protocol"
         );
+    }
+
+    #[test]
+    fn strips_multipart_suffixes() {
+        assert_eq!(
+            humanize(&PathBuf::from("Echo.Point.Nova.v1.41-VoxanPortable.part1.rar")),
+            "Echo Point Nova Voxanportable"
+        );
+        assert_eq!(humanize(&PathBuf::from("GhostExile085.7z.001")), "Ghostexile085");
+        assert_eq!(humanize(&PathBuf::from("W.Skies.175.zip.001")), "W Skies");
     }
 
     #[test]
