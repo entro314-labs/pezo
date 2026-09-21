@@ -23,7 +23,7 @@ proven tools and keeps the bookkeeping:
 Everything lives on one disk (use ext4 — Proton misbehaves on NTFS), so the
 library survives distro hops and machine moves:
 
-```
+```tree
 /mnt/games/
 ├── installers/   # drop your GOG setup exes, folders and archives here
 ├── library/      # installed games
