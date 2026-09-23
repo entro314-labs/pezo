@@ -1,0 +1,14 @@
+{
+  "steps": ["version", "changelog", "tag", "push"],
+  "publish": null,
+  "versionFiles": [
+    "package.json",
+    "src-tauri/tauri.conf.json",
+    "Cargo.toml",
+    {
+      "path": "Cargo.lock",
+      "pattern": "name = \"pezo-app\"\nversion = \"(.+)\""
+    }
+  ],
+  "verify": "pnpm lint && pnpm typecheck"
+}

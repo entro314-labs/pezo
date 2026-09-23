@@ -4,3 +4,8 @@ dist
 *.log
 .DS_Store
 /src-tauri/gen/schemas
+
+# tauri-release-kit: config overlays generated during a release run
+# (Windows signing overlay, App Store provisioning profile).
+src-tauri/.release-kit.*.conf.json
+src-tauri/embedded.provisionprofile

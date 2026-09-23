@@ -27,6 +27,19 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png"]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVBQTMwOTk1MUQ1QkNGREYKUldUZnoxc2RsUW1qNmd6cTBQbTBmN0VzRFBsZlNmK0o3Y083UWF6VkZyY2Q1SHlHMjRvV1JVbkMK",
+      "endpoints": [
+        "https://github.com/entro314-labs/pezo/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

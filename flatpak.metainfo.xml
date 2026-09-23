@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream MetaInfo for the Flatpak build (tauri-release-kit's flatpak.yml
+  reads this via its `metainfo` input). It is also what desktop software
+  centres show for the .deb, so it is worth shipping in both.
+
+  BEFORE SUBMITTING TO FLATHUB: add at least one <screenshot>, served over
+  HTTPS. Flathub rejects submissions without one. Note also that Flathub
+  requires you to control the app-id domain — `gr.myroomie.pezo` needs
+  myroomie.gr, otherwise rename to io.github.entro314-labs.pezo.
+-->
+<component type="desktop-application">
+  <!-- Must equal tauri.conf.json > identifier and the flatpak app_id input. -->
+  <id>gr.myroomie.pezo</id>
+  <launchable type="desktop-id">gr.myroomie.pezo.desktop</launchable>
+
+  <name>Pezo</name>
+  <summary>Offline game library manager</summary>
+
+  <developer id="com.entro314labs">
+    <name>entro314 labs</name>
+  </developer>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      Pezo is an offline game library manager for Linux. It keeps track of what
+      you own and where it lives, without needing an account or a network
+      connection to be useful.
+    </p>
+  </description>
+
+  <!-- TODO before Flathub submission: at least one HTTPS screenshot.
+  <screenshots>
+    <screenshot type="default">
+      <image>https://example.com/screenshots/pezo-main.png</image>
+      <caption>The main window</caption>
+    </screenshot>
+  </screenshots>
+  -->
+
+  <url type="homepage">https://github.com/entro314-labs/pezo</url>
+  <url type="bugtracker">https://github.com/entro314-labs/pezo/issues</url>
+
+  <content_rating type="oars-1.1"/>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <recommends>
+    <display_length compare="ge">768</display_length>
+  </recommends>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-19"/>
+  </releases>
+
+  <update_contact>hey@myroomie.gr</update_contact>
+</component>

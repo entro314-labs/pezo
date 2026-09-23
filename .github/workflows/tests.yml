@@ -1,0 +1,27 @@
+# Thin caller for the shared Rust quality gates (tauri-release-kit). Runs on
+# branch pushes so a release tag never discovers gate failures — a Mac cannot
+# see Linux/Windows diagnostics in cfg-gated code.
+name: Rust checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: rust-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    # Pinned, not @main: same policy as release.yml — an external workflow ref
+    # that anyone can move should never be trusted by CI here.
+    uses: entro314-labs/tauri-release-kit/.github/workflows/rust-checks.yml@fee0d83d27110a46c01dc918bd7614dc7ac89dea
+    with:
+      project_path: '.'
+      # Repo-root cargo workspace (src-tauri is a member).
+      rust_workspace_dir: '.'
+      clippy_args: '--workspace --all-targets'
+      run_tests: true
+      test_args: '--workspace'

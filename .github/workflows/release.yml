@@ -1,0 +1,115 @@
+# Thin caller for the shared Tauri release pipeline (tauri-release-kit).
+# The full build → sign → manifest → verify → publish → homebrew pipeline
+# lives in entro314-labs/tauri-release-kit — fixes land there once and every
+# app picks them up. War stories: that repo's docs/GOTCHAS.md.
+#
+# pezo is a PUBLIC repo, so releases and updater manifests are served from it
+# directly — no releases mirror and no RELEASES_TOKEN, unlike the private apps
+# in the fleet.
+#
+# Required secret: TAURI_SIGNING_PRIVATE_KEY (the ~/.tauri/pezo.key minisign
+# key). Optional: HOMEBREW_TAP_TOKEN (the cask job skips with a warning
+# without it).
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0 — plain semver, single channel)'
+        required: true
+        type: string
+      build_targets:
+        description: >-
+          Retry lever: only build these legs (comma-separated updater keys,
+          e.g. "windows-aarch64,linux-x86_64"). Empty = all. After a partially
+          failed release, re-dispatch with the SAME tag and just the failed
+          legs — the run reuses the existing draft, so successful legs' assets
+          are kept and only the failed legs cost runner minutes again.
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Pinned to a reviewed commit, NOT @main: this workflow runs with
+    # `contents: write`, so a mutable external ref would let any push to the
+    # kit's default branch publish releases here. Bump deliberately after
+    # reviewing the diff.
+    # fee0d83 = "Add packaging documentation and templates for Linux and App
+    # Store" (2026-08-19).
+    uses: entro314-labs/tauri-release-kit/.github/workflows/release.yml@fee0d83d27110a46c01dc918bd7614dc7ac89dea
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      app_display_name: 'Pezo'
+      project_path: '.'
+      # The crate is `pezo-app`, not `pezo` — src-tauri is a member of the
+      # repo-root cargo workspace, so Cargo.lock and target/ live at the root.
+      cargo_package: 'pezo-app'
+      rust_workspace_dir: '.'
+      tag: ${{ inputs.tag || '' }}
+      build_targets: ${{ inputs.build_targets || '' }}
+      # deb + rpm + AppImage on both Linux legs (the kit default). The RPM is
+      # the only Linux artifact Tauri can sign, and the deb is what the flatpak
+      # and AUR jobs below repack.
+      linux_bundles: 'deb,rpm,appimage'
+      # release-kit writes the version BEFORE tagging (release.config.json),
+      # so the kit's post-release patch-bump PR would be a second writer — and
+      # it could not find the version anyway, since src-tauri/Cargo.toml
+      # inherits it via `version.workspace = true`.
+      post_release_bump: false
+      # Homebrew: stable → the `pezo` cask (requires the HOMEBREW_TAP_TOKEN
+      # secret; skips with a warning without it). product_name must equal
+      # tauri.conf.json's productName exactly — it is the asset filename stem
+      # (Pezo_X.Y.Z_aarch64.dmg).
+      product_name: 'Pezo'
+      homebrew_tap: 'entro314-labs/homebrew-tap'
+      cask_desc: 'Offline game library manager'
+      cask_homepage: 'https://github.com/entro314-labs/pezo'
+      bundle_identifier: 'gr.myroomie.pezo'
+    secrets: inherit
+
+  # Flatpak, built by repacking the .deb the release above published. Skips
+  # itself with a warning if that .deb is absent, so it can never retroactively
+  # fail a release that already shipped.
+  flatpak:
+    needs: release
+    uses: entro314-labs/tauri-release-kit/.github/workflows/flatpak.yml@fee0d83d27110a46c01dc918bd7614dc7ac89dea
+    permissions:
+      contents: write
+    with:
+      tag: ${{ inputs.tag || '' }}
+      # Must equal tauri.conf.json > identifier.
+      app_id: 'gr.myroomie.pezo'
+      product_name: 'Pezo'
+      arches: 'x86_64,aarch64'
+      metainfo: 'flatpak.metainfo.xml'
+    secrets: inherit
+
+  # Arch User Repository. Without the AUR_SSH_PRIVATE_KEY secret this renders
+  # and validates the PKGBUILD (checksums, sources, .SRCINFO, namcap) and
+  # uploads it as an artifact without publishing — which is the right way to
+  # run it until the key exists.
+  aur:
+    needs: release
+    uses: entro314-labs/tauri-release-kit/.github/workflows/aur.yml@fee0d83d27110a46c01dc918bd7614dc7ac89dea
+    with:
+      tag: ${{ inputs.tag || '' }}
+      # The -bin suffix is required by Arch for prebuilt binaries.
+      pkgname: 'pezo-bin'
+      pkgdesc: 'Offline game library manager'
+      url: 'https://github.com/entro314-labs/pezo'
+      license: 'MIT'
+      maintainer: 'Dominikos Pritis <hey@myroomie.gr>'
+      provides: 'pezo'
+      conflicts: 'pezo'
+    secrets: inherit
