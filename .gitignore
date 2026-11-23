@@ -9,3 +9,7 @@ dist
 # (Windows signing overlay, App Store provisioning profile).
 src-tauri/.release-kit.*.conf.json
 src-tauri/embedded.provisionprofile
+WEBKIT_DISABLE_DMABUF_RENDERER=1 timeout.md
+
+# Local scratch and artifacts
+.nope/
