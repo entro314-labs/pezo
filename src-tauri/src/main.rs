@@ -7,7 +7,12 @@ fn main() {
     // Desktop-entry launches: `pezo-app --launch <slug>` runs the game
     // headless (no window) and exits with its status.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let ["--launch", slug] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    if let ["--launch", slug] = args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         std::process::exit(headless_launch(slug));
     }
 

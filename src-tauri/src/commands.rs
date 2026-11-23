@@ -179,10 +179,20 @@ const TOOL_PACKAGES: &[(&str, &str, &str, &str)] = &[
     // (tool, pacman, apt, dnf) — empty string = not packaged there.
     ("umu-launcher", "umu-launcher", "", "umu-launcher"),
     ("innoextract", "innoextract", "innoextract", "innoextract"),
-    ("bsdtar (libarchive)", "libarchive", "libarchive-tools", "bsdtar"),
+    (
+        "bsdtar (libarchive)",
+        "libarchive",
+        "libarchive-tools",
+        "bsdtar",
+    ),
     ("7-Zip", "7zip", "7zip", "p7zip"),
     ("unrar", "unrar", "unrar", ""),
-    ("DOSBox", "dosbox-staging", "dosbox-staging", "dosbox-staging"),
+    (
+        "DOSBox",
+        "dosbox-staging",
+        "dosbox-staging",
+        "dosbox-staging",
+    ),
     ("ScummVM", "scummvm", "scummvm", "scummvm"),
     ("GameMode", "gamemode", "gamemode", "gamemode"),
     ("MangoHud", "mangohud", "mangohud", "mangohud"),
@@ -250,9 +260,7 @@ pub async fn install_tool(tool: String) -> CmdResult<()> {
         let output = std::process::Command::new(&pkexec)
             .args(&args)
             .output()
-            .map_err(|e| {
-                pezo_core::CoreError::Unsupported(format!("failed to run pkexec: {e}"))
-            })?;
+            .map_err(|e| pezo_core::CoreError::Unsupported(format!("failed to run pkexec: {e}")))?;
         if output.status.success() {
             Ok(())
         } else {
@@ -260,7 +268,12 @@ pub async fn install_tool(tool: String) -> CmdResult<()> {
             Err(pezo_core::CoreError::CommandFailed {
                 command: format!("pkexec {}", args.join(" ")),
                 status: output.status.to_string(),
-                stderr: stderr.lines().last().unwrap_or("cancelled").trim().to_string(),
+                stderr: stderr
+                    .lines()
+                    .last()
+                    .unwrap_or("cancelled")
+                    .trim()
+                    .to_string(),
             })
         }
     })
@@ -329,11 +342,7 @@ pub fn list_candidate_archives(candidate_id: i64) -> CmdResult<Vec<String>> {
 
 /// Enqueue an install; the queue worker runs them one at a time.
 #[tauri::command]
-pub fn queue_install(
-    app: AppHandle,
-    candidate_id: i64,
-    archive: Option<String>,
-) -> CmdResult<u64> {
+pub fn queue_install(app: AppHandle, candidate_id: i64, archive: Option<String>) -> CmdResult<u64> {
     let config = Config::load().map_err(err)?;
     let (_, db) = open_library(&config).map_err(err)?;
     let candidate = db.get_candidate(candidate_id).map_err(err)?;

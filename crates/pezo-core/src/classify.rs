@@ -106,7 +106,10 @@ pub fn multipart_parts(path: &Path) -> Vec<PathBuf> {
 /// Part number of `name` if it belongs to the multipart set with prefix `base`.
 fn part_number(name: &str, base: &str) -> Option<u32> {
     let rest = name.strip_prefix(base)?;
-    if let Some(digits) = rest.strip_prefix(".part").and_then(|r| r.strip_suffix(".rar")) {
+    if let Some(digits) = rest
+        .strip_prefix(".part")
+        .and_then(|r| r.strip_suffix(".rar"))
+    {
         return digits.parse().ok();
     }
     rest.strip_prefix('.')
@@ -497,10 +500,7 @@ mod tests {
             classify(&rip).expect("classify"),
             Classification::Candidate(CandidateKind::Archive)
         );
-        assert_eq!(
-            find_inner_archive(&rip),
-            Some(rip.join("Some Old Game.7z"))
-        );
+        assert_eq!(find_inner_archive(&rip), Some(rip.join("Some Old Game.7z")));
 
         // Several archives (disc sets) stay unclassified rather than guessing.
         let discs = dir.path().join("Disc Set");

@@ -138,7 +138,12 @@ fn build_command(game: &Game) -> Result<Command> {
 
     // Wrappers prepend to the command line: `gamemoderun mangohud umu-run …`.
     let mut wrapped: Vec<OsString> = Vec::new();
-    for wrapper in game.wrappers.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+    for wrapper in game
+        .wrappers
+        .split(',')
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+    {
         let (bin, name, hint) = match wrapper {
             "gamemode" => (
                 "gamemoderun",

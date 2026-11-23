@@ -330,9 +330,8 @@ fn register_portable(
         };
 
         opts.stage(InstallStage::Registering);
-        let exe = find_main_exe(&root).ok_or_else(|| {
-            CoreError::NotFound(format!("no executable in {}", root.display()))
-        })?;
+        let exe = find_main_exe(&root)
+            .ok_or_else(|| CoreError::NotFound(format!("no executable in {}", root.display())))?;
         (root, exe, appid)
     } else {
         // A bare exe always runs in place — its parent folder is not ours to copy.
@@ -489,7 +488,12 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
         let out_flag = format!("-o{}", dest.display());
         let mut cmd = deprioritized(
             &sevenzip,
-            &["x".as_ref(), "-y".as_ref(), out_flag.as_ref(), archive.as_os_str()],
+            &[
+                "x".as_ref(),
+                "-y".as_ref(),
+                out_flag.as_ref(),
+                archive.as_os_str(),
+            ],
         );
         match run_extractor(&mut cmd) {
             Ok(()) => return Ok(()),
@@ -506,7 +510,12 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
         if let Some(unrar) = deps::which("unrar") {
             let mut cmd = deprioritized(
                 &unrar,
-                &["x".as_ref(), "-o+".as_ref(), archive.as_os_str(), dest.as_os_str()],
+                &[
+                    "x".as_ref(),
+                    "-o+".as_ref(),
+                    archive.as_os_str(),
+                    dest.as_os_str(),
+                ],
             );
             match run_extractor(&mut cmd) {
                 Ok(()) => return Ok(()),
@@ -790,7 +799,10 @@ mod tests {
     fn steam_appid_from_manifest() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("rip");
-        touch(&root.join("steamapps").join("appmanifest_228400.acf"), b"{}");
+        touch(
+            &root.join("steamapps").join("appmanifest_228400.acf"),
+            b"{}",
+        );
         assert_eq!(steam_appid(&root), Some("228400".to_string()));
         assert_eq!(steam_appid(dir.path()), None);
     }

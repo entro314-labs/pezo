@@ -71,9 +71,10 @@ pub fn enqueue(app: &AppHandle, candidate_id: i64, title: String, archive: Optio
     let q = queue();
     let id = {
         let mut tasks = q.tasks.lock().unwrap();
-        if let Some(existing) = tasks.iter().find(|t| {
-            t.candidate_id == candidate_id && matches!(t.status, "queued" | "running")
-        }) {
+        if let Some(existing) = tasks
+            .iter()
+            .find(|t| t.candidate_id == candidate_id && matches!(t.status, "queued" | "running"))
+        {
             return existing.id;
         }
         let id = q.next_id.fetch_add(1, Ordering::Relaxed);
@@ -162,7 +163,9 @@ pub fn spawn_worker(app: AppHandle) {
 fn run_task(app: &AppHandle, task: &QueueTask) -> Result<Game, String> {
     let config = Config::load().map_err(|e| e.to_string())?;
     let (paths, db) = open_library(&config).map_err(|e| e.to_string())?;
-    let candidate = db.get_candidate(task.candidate_id).map_err(|e| e.to_string())?;
+    let candidate = db
+        .get_candidate(task.candidate_id)
+        .map_err(|e| e.to_string())?;
 
     // Progress: the queue runs one task at a time, so whatever new directory
     // appears under <library>/library during this task is its output. Its
@@ -205,13 +208,9 @@ fn run_task(app: &AppHandle, task: &QueueTask) -> Result<Game, String> {
     };
 
     let result = match &task.archive {
-        Some(archive) => install::install_candidate_archive(
-            &db,
-            &paths,
-            candidate.id,
-            Path::new(archive),
-            &opts,
-        ),
+        Some(archive) => {
+            install::install_candidate_archive(&db, &paths, candidate.id, Path::new(archive), &opts)
+        }
         None => install::install_candidate(&db, &paths, candidate.id, &opts),
     };
 
