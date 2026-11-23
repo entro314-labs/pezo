@@ -31,9 +31,10 @@ pub fn fetch_cover(
 
     // Generous timeout: hosts with broken IPv6 can spend several seconds per
     // connection before falling back to IPv4.
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(20))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(20)))
+        .build()
+        .into();
 
     let appid = match steam_appid {
         Some(id) => Some(id.to_string()),
@@ -46,7 +47,9 @@ pub fn fetch_cover(
 
     // Portrait library asset first (matches the tile aspect), header as backup.
     let urls = [
-        format!("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900.jpg"),
+        format!(
+            "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900.jpg"
+        ),
         format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/library_600x900.jpg"),
         format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"),
     ];
@@ -56,6 +59,7 @@ pub fn fetch_cover(
         };
         let mut bytes = Vec::new();
         if response
+            .into_body()
             .into_reader()
             .take(MAX_COVER_BYTES)
             .read_to_end(&mut bytes)
@@ -80,7 +84,7 @@ fn search_appid(agent: &ureq::Agent, title: &str) -> Option<String> {
         "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US",
         urlencode(title)
     );
-    let body: serde_json::Value = agent.get(&url).call().ok()?.into_json().ok()?;
+    let body: serde_json::Value = agent.get(&url).call().ok()?.into_body().read_json().ok()?;
     let id = body.get("items")?.get(0)?.get("id")?;
     Some(id.as_i64()?.to_string())
 }
@@ -118,7 +122,11 @@ mod tests {
         let fetched = fetch_cover(&paths, "hades", "Hades", None).expect("fetch");
         let path = fetched.expect("cover found");
         let bytes = fs::read(&path).expect("read cover");
-        assert!(bytes.len() > 10_000, "cover too small: {} bytes", bytes.len());
+        assert!(
+            bytes.len() > 10_000,
+            "cover too small: {} bytes",
+            bytes.len()
+        );
         assert_eq!(cover_path(&paths, "hades"), Some(path));
     }
 }

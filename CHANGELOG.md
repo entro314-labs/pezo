@@ -10,6 +10,11 @@ The release pipeline refuses to release a tag `vX.Y.Z` without a matching
 
 ## [Unreleased]
 
+### Security
+
+- SQLite updated: rusqlite 0.40 to 0.43 brings a libsqlite3-sys without
+  RUSTSEC-2026-0459.
+
 ## [0.1.0] - 2026-08-19
 
 ### Added

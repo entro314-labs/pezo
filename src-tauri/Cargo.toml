@@ -7,16 +7,16 @@ authors.workspace = true
 description = "Pezo desktop app: offline game library manager for Linux"
 
 [build-dependencies]
-tauri-build = { version = "2.6.3", features = [] }
+tauri-build = { version = "2.7.6", features = [] }
 
 [dependencies]
 pezo-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2.11.5", features = [] }
-tauri-plugin-dialog = "2.7.2"
-tauri-plugin-opener = "2.5.4"
+tauri = { version = "2.12.7", features = [] }
+tauri-plugin-dialog = "2.8.4"
+tauri-plugin-opener = "2.7.3"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-notification = "2"
-base64 = "0.22"
+base64 = "0.23"
