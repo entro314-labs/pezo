@@ -46,19 +46,18 @@ pub fn multipart_role(name: &str) -> Option<MultipartRole> {
         }
         return None;
     }
-    if let Some((stem, digits)) = lower.rsplit_once('.') {
-        if digits.len() == 3
-            && digits.chars().all(|c| c.is_ascii_digit())
-            && stem
-                .rsplit_once('.')
-                .is_some_and(|(_, ext)| ARCHIVE_EXTS.contains(&ext))
-        {
-            return Some(if digits == "001" {
-                MultipartRole::Head
-            } else {
-                MultipartRole::Tail
-            });
-        }
+    if let Some((stem, digits)) = lower.rsplit_once('.')
+        && digits.len() == 3
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && stem
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ARCHIVE_EXTS.contains(&ext))
+    {
+        return Some(if digits == "001" {
+            MultipartRole::Head
+        } else {
+            MultipartRole::Tail
+        });
     }
     None
 }

@@ -130,7 +130,7 @@ pub fn scan_dir(db: &Db, dir: &Path, opts: &ScanOptions<'_>) -> Result<ScanOutco
 fn collect_entries(dir: &Path, skip: &[PathBuf], out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir).map_err(io_err(dir))? {
         let path = entry.map_err(io_err(dir))?.path();
-        if !skip.iter().any(|s| *s == path) {
+        if !skip.contains(&path) {
             out.push(path);
         }
     }
