@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter};
 use pezo_core::deps::ToolStatus;
 use pezo_core::launch::LaunchOutcome;
 use pezo_core::scan::{ScanOptions, ScanOutcome};
+use pezo_core::wine::{self, InstallProgress, WineBuild, WineRelease, WineSource};
 use pezo_core::{
     Candidate, Config, FsInfo, Game, classify, config, covers, install, launch, open_library, scan,
 };
@@ -25,6 +26,9 @@ fn err(e: impl std::fmt::Display) -> String {
 /// One scan at a time — a second request while one runs is a UI race, not a
 /// reason to hammer the disks twice.
 static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// One Wine/Proton download at a time — each is hundreds of MB.
+static WINE_INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Games currently running via launch_game, to refuse double launches.
 static RUNNING_GAMES: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -121,6 +125,14 @@ pub fn remove_scan_dir(path: String) -> CmdResult<Config> {
 pub fn set_adopt_portables(enabled: bool) -> CmdResult<Config> {
     let mut config = Config::load().map_err(err)?;
     config.adopt_portables = enabled;
+    config.save().map_err(err)?;
+    Ok(config)
+}
+
+#[tauri::command]
+pub fn set_interactive_installers(enabled: bool) -> CmdResult<Config> {
+    let mut config = Config::load().map_err(err)?;
+    config.interactive_installers = enabled;
     config.save().map_err(err)?;
     Ok(config)
 }
@@ -415,17 +427,32 @@ pub async fn fetch_missing_covers() -> CmdResult<usize> {
     .await
 }
 
+/// Save per-game launch options. `wine_build` None follows the default build.
 #[tauri::command]
 pub fn update_launch_options(
     game_id: i64,
     launch_args: String,
     env_vars: String,
     wrappers: String,
+    wine_build: Option<String>,
 ) -> CmdResult<Game> {
     let config = Config::load().map_err(err)?;
     let (_, db) = open_library(&config).map_err(err)?;
-    db.update_launch_options(game_id, &launch_args, &env_vars, &wrappers)
-        .map_err(err)?;
+    // Only a newly picked build must exist here; a pick carried over from
+    // another machine shouldn't block saving the other options.
+    if let Some(name) = &wine_build
+        && db.get_game(game_id).map_err(err)?.wine_build.as_ref() != Some(name)
+    {
+        wine::find(name).map_err(err)?;
+    }
+    db.update_launch_options(
+        game_id,
+        &launch_args,
+        &env_vars,
+        &wrappers,
+        wine_build.as_deref(),
+    )
+    .map_err(err)?;
     db.get_game(game_id).map_err(err)
 }
 
@@ -434,7 +461,76 @@ pub fn update_launch_options(
 pub fn run_winetricks(game_id: i64) -> CmdResult<()> {
     let config = Config::load().map_err(err)?;
     let (_, db) = open_library(&config).map_err(err)?;
-    launch::run_winetricks(&db, game_id).map_err(err)
+    launch::run_winetricks(&db, game_id, config.default_wine.as_deref()).map_err(err)
+}
+
+/// Wine and Proton builds installed on this machine.
+#[tauri::command]
+pub fn list_wine_builds() -> CmdResult<Vec<WineBuild>> {
+    wine::detect().map_err(err)
+}
+
+/// Projects Pezo can download builds from.
+#[tauri::command]
+pub fn wine_sources() -> &'static [WineSource] {
+    wine::SOURCES
+}
+
+#[tauri::command]
+pub async fn list_wine_releases(source: String) -> CmdResult<Vec<WineRelease>> {
+    run_blocking(move || wine::list_releases(&source)).await
+}
+
+#[derive(Clone, Serialize)]
+struct WineInstallEvent {
+    source: String,
+    tag: Option<String>,
+    progress: InstallProgress,
+}
+
+/// Download and unpack a build (`tag` None → latest). Progress streams as
+/// `wine-install-progress` events.
+#[tauri::command]
+pub async fn install_wine_build(
+    app: AppHandle,
+    source: String,
+    tag: Option<String>,
+) -> CmdResult<WineBuild> {
+    let guard = FlagGuard::acquire(
+        &WINE_INSTALL_RUNNING,
+        "a Wine/Proton download is already running",
+    )?;
+    let result = run_blocking(move || {
+        let report = |progress: InstallProgress| {
+            let _ = app.emit(
+                "wine-install-progress",
+                WineInstallEvent {
+                    source: source.clone(),
+                    tag: tag.clone(),
+                    progress,
+                },
+            );
+        };
+        wine::install_release(&source, tag.as_deref(), &report)
+    })
+    .await;
+    drop(guard);
+    result
+}
+
+#[tauri::command]
+pub fn remove_wine_build(name: String) -> CmdResult<Config> {
+    let mut config = Config::load().map_err(err)?;
+    wine::remove(&mut config, &name).map_err(err)?;
+    Ok(config)
+}
+
+/// Set the build games use unless they pick their own (None → umu's default).
+#[tauri::command]
+pub fn set_default_wine(name: Option<String>) -> CmdResult<Config> {
+    let mut config = Config::load().map_err(err)?;
+    wine::set_default(&mut config, name.as_deref()).map_err(err)?;
+    Ok(config)
 }
 
 #[derive(Clone, Serialize)]
@@ -454,7 +550,7 @@ pub fn launch_game(app: AppHandle, game_id: i64) -> CmdResult<()> {
         let result = (|| {
             let config = Config::load()?;
             let (_, db) = open_library(&config)?;
-            launch::launch_game(&db, game_id)
+            launch::launch_game(&db, game_id, config.default_wine.as_deref())
         })();
         let payload = match result {
             Ok(outcome) => GameExited {

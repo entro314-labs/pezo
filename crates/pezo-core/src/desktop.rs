@@ -1,17 +1,13 @@
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::error::{CoreError, Result, io_err};
+use crate::config::data_home;
+use crate::error::{Result, io_err};
 use crate::model::Game;
 
 /// Where per-game .desktop launchers are written.
 fn applications_dir() -> Result<PathBuf> {
-    let base = env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
-        .ok_or_else(|| CoreError::Config("neither XDG_DATA_HOME nor HOME is set".into()))?;
-    Ok(base.join("applications"))
+    Ok(data_home()?.join("applications"))
 }
 
 fn entry_path(slug: &str) -> Result<PathBuf> {

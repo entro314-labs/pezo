@@ -9,6 +9,7 @@ use crate::db::Db;
 use crate::deps;
 use crate::error::{CoreError, Result, io_err};
 use crate::model::{Game, Runner};
+use crate::wine::{self, WineCommand};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchOutcome {
@@ -17,10 +18,11 @@ pub struct LaunchOutcome {
     pub seconds: i64,
 }
 
-/// Launch a game, block until it exits, and record playtime.
-pub fn launch_game(db: &Db, game_id: i64) -> Result<LaunchOutcome> {
+/// Launch a game, block until it exits, and record playtime. `default_wine`
+/// is the configured Wine/Proton build for games without their own pick.
+pub fn launch_game(db: &Db, game_id: i64, default_wine: Option<&str>) -> Result<LaunchOutcome> {
     let game = db.get_game(game_id)?;
-    let mut cmd = build_command(&game)?;
+    let mut cmd = build_command(&game, default_wine)?;
 
     tracing::info!(game = %game.title, runner = game.runner.as_str(), "launching");
     let started = Instant::now();
@@ -35,8 +37,9 @@ pub fn launch_game(db: &Db, game_id: i64) -> Result<LaunchOutcome> {
     })
 }
 
-/// Open winetricks inside a Proton game's prefix (via umu, detached).
-pub fn run_winetricks(db: &Db, game_id: i64) -> Result<()> {
+/// Open winetricks inside a Windows game's prefix (detached), using the
+/// game's Wine/Proton build.
+pub fn run_winetricks(db: &Db, game_id: i64, default_wine: Option<&str>) -> Result<()> {
     let game = db.get_game(game_id)?;
     if game.runner != Runner::Proton {
         return Err(CoreError::Unsupported(format!(
@@ -45,18 +48,8 @@ pub fn run_winetricks(db: &Db, game_id: i64) -> Result<()> {
             game.runner.as_str()
         )));
     }
-    let umu = require_umu()?;
-    let prefix = game.prefix_path.as_ref().ok_or_else(|| {
-        CoreError::InvalidState(format!("game `{}` has no wine prefix", game.slug))
-    })?;
-    fs::create_dir_all(prefix).map_err(io_err(prefix))?;
-
-    let mut cmd = Command::new(umu);
-    cmd.arg("winetricks")
-        .arg("--gui")
-        .env("WINEPREFIX", prefix)
-        .env("GAMEID", game_umu_id(&game));
-    apply_store(&mut cmd, &game);
+    let build = wine::resolve(game.wine_build.as_deref(), default_wine)?;
+    let mut cmd = game_wine_command(&game, build.as_ref())?.winetricks(build.as_ref())?;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -64,14 +57,6 @@ pub fn run_winetricks(db: &Db, game_id: i64) -> Result<()> {
     }
     cmd.spawn().map_err(io_err(&game.launch_path))?;
     Ok(())
-}
-
-fn require_umu() -> Result<std::path::PathBuf> {
-    deps::require(
-        &["umu-run"],
-        "umu-launcher",
-        "install it to launch Windows games (https://github.com/Open-Wine-Components/umu-launcher)",
-    )
 }
 
 /// GAMEID for umu: a real store id unlocks per-game protonfixes; otherwise a
@@ -83,31 +68,30 @@ fn game_umu_id(game: &Game) -> String {
     }
 }
 
-fn apply_store(cmd: &mut Command, game: &Game) {
-    if let Some(store) = &game.store {
-        cmd.env("STORE", store);
-    }
+/// The game's prefix (created on demand) wrapped in a Wine/Proton command.
+pub(crate) fn game_wine_command(
+    game: &Game,
+    build: Option<&wine::WineBuild>,
+) -> Result<WineCommand> {
+    let prefix = game.prefix_path.as_ref().ok_or_else(|| {
+        CoreError::InvalidState(format!("game `{}` has no wine prefix", game.slug))
+    })?;
+    fs::create_dir_all(prefix).map_err(io_err(prefix))?;
+    WineCommand::new(build, prefix, &game_umu_id(game), game.store.as_deref())
 }
 
-fn build_command(game: &Game) -> Result<Command> {
+fn build_command(game: &Game, default_wine: Option<&str>) -> Result<Command> {
     // Base program + args per runner.
     let mut argv: Vec<OsString> = Vec::new();
     let mut envs: Vec<(&'static str, OsString)> = Vec::new();
 
     match game.runner {
         Runner::Proton => {
-            let umu = require_umu()?;
-            let prefix = game.prefix_path.as_ref().ok_or_else(|| {
-                CoreError::InvalidState(format!("game `{}` has no wine prefix", game.slug))
-            })?;
-            fs::create_dir_all(prefix).map_err(io_err(prefix))?;
-            argv.push(umu.into_os_string());
+            let build = wine::resolve(game.wine_build.as_deref(), default_wine)?;
+            let wine_cmd = game_wine_command(game, build.as_ref())?;
+            argv.extend(wine_cmd.argv);
             argv.push(game.launch_path.clone().into_os_string());
-            envs.push(("WINEPREFIX", prefix.clone().into_os_string()));
-            envs.push(("GAMEID", game_umu_id(game).into()));
-            if let Some(store) = &game.store {
-                envs.push(("STORE", store.into()));
-            }
+            envs.extend(wine_cmd.envs);
         }
         Runner::Dosbox => {
             let dosbox = deps::require(
@@ -178,7 +162,12 @@ fn build_command(game: &Game) -> Result<Command> {
     match game.runner {
         // ScummVM takes the game dir as an argument, not a cwd.
         Runner::Scummvm => {}
-        _ => {
+        // Like a Windows shortcut: start in the exe's own folder, which is
+        // where games look for their data.
+        Runner::Proton => {
+            cmd.current_dir(game.launch_path.parent().unwrap_or(&game.install_path));
+        }
+        Runner::Dosbox => {
             cmd.current_dir(&game.install_path);
         }
     }

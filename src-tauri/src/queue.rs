@@ -15,7 +15,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use pezo_core::install::{InstallOptions, InstallStage};
-use pezo_core::{Config, Game, covers, desktop, install, open_library};
+use pezo_core::{Config, Game, install, open_library};
 
 #[derive(Clone, Serialize)]
 pub struct QueueTask {
@@ -205,6 +205,8 @@ fn run_task(app: &AppHandle, task: &QueueTask) -> Result<Game, String> {
     let opts = InstallOptions {
         adopt_portables: config.adopt_portables,
         progress: Some(&stage_cb),
+        default_wine: config.default_wine.as_deref(),
+        interactive: config.interactive_installers,
     };
 
     let result = match &task.archive {
@@ -218,26 +220,11 @@ fn run_task(app: &AppHandle, task: &QueueTask) -> Result<Game, String> {
     let _ = monitor.join();
 
     let game = result.map_err(|e| e.to_string())?;
-    finish_install(&paths, &game);
-    Ok(game)
-}
-
-/// Post-install niceties, all best-effort: cover art and a desktop launcher.
-fn finish_install(paths: &pezo_core::LibraryPaths, game: &Game) {
-    let steam_appid = match game.store.as_deref() {
-        Some("gog") => None,
-        _ => game.store_id.as_deref(),
-    };
-    let cover = covers::fetch_cover(paths, &game.slug, &game.title, steam_appid)
-        .ok()
-        .flatten();
-
     if let Ok(exe) = std::env::current_exe() {
         let exec = format!("\"{}\" --launch {}", exe.display(), game.slug);
-        if let Err(e) = desktop::write_desktop_entry(game, &exec, cover.as_deref()) {
-            eprintln!("desktop entry for {} failed: {e}", game.slug);
-        }
+        install::finish_install(&paths, &game, &exec);
     }
+    Ok(game)
 }
 
 fn dir_names(dir: &Path) -> HashSet<OsString> {

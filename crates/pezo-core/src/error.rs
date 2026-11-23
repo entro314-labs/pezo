@@ -27,6 +27,9 @@ pub enum CoreError {
         stderr: String,
     },
 
+    #[error("network error: {0}")]
+    Network(String),
+
     #[error("not found: {0}")]
     NotFound(String),
 

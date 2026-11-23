@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type { AppConfig, FsInfo, ToolStatus } from "../types";
+import { WineBuildsSection } from "./WineBuildsSection";
 
 interface Props {
   config: AppConfig;
@@ -116,6 +117,29 @@ export function SetupView({ config, tools, fsInfo, onLibraryChanged, onError, on
               </span>
             </span>
           </label>
+          <label className="mt-3 flex items-start gap-2 text-sm text-t1">
+            <input
+              type="checkbox"
+              checked={config.interactive_installers}
+              className="mt-0.5"
+              onChange={async (e) => {
+                try {
+                  await api.setInteractiveInstallers(e.target.checked);
+                  onLibraryChanged();
+                } catch (err) {
+                  onError(String(err));
+                }
+              }}
+            />
+            <span>
+              Show installer windows for setup.exe and MSI installers
+              <span className="block text-xs text-t3">
+                Off = they run unattended into the game's prefix with default options. Repacks
+                (FitGirl, xatab…) always show theirs — tick "Limit installer to 2 GB of RAM" on
+                the first page.
+              </span>
+            </span>
+          </label>
         </section>
 
         <section className="card mb-6 p-5">
@@ -145,6 +169,13 @@ export function SetupView({ config, tools, fsInfo, onLibraryChanged, onError, on
             </ul>
           )}
         </section>
+
+        <WineBuildsSection
+          config={config}
+          onConfigChanged={onLibraryChanged}
+          onError={onError}
+          onNotice={onNotice}
+        />
 
         <section className="card p-5">
           <h3 className="text-sm font-semibold text-t1">External tools</h3>

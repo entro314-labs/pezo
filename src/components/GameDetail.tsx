@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, playtime } from "../api";
-import type { Game } from "../types";
+import type { Game, WineBuild } from "../types";
 import { RUNNER_LABELS } from "../types";
 
 interface Props {
   game: Game;
   cover: string | null;
   running: boolean;
+  /** Configured default Wine/Proton build; null → umu's own default. */
+  defaultWine: string | null;
   onLaunch: (game: Game) => void;
   onBack: () => void;
   onChanged: () => void;
@@ -34,6 +36,7 @@ export function GameDetail({
   game,
   cover,
   running,
+  defaultWine,
   onLaunch,
   onBack,
   onChanged,
@@ -158,7 +161,13 @@ export function GameDetail({
         </div>
       </div>
 
-      <LaunchOptions game={game} onChanged={onChanged} onError={onError} onNotice={onNotice} />
+      <LaunchOptions
+        game={game}
+        defaultWine={defaultWine}
+        onChanged={onChanged}
+        onError={onError}
+        onNotice={onNotice}
+      />
 
       <section className="card mt-4 p-4">
         <h3 className="text-sm font-semibold text-t1">Locations</h3>
@@ -219,11 +228,13 @@ export function GameDetail({
 
 function LaunchOptions({
   game,
+  defaultWine,
   onChanged,
   onError,
   onNotice,
 }: {
   game: Game;
+  defaultWine: string | null;
   onChanged: () => void;
   onError: (message: string) => void;
   onNotice: (message: string) => void;
@@ -238,13 +249,25 @@ function LaunchOptions({
   const [env, setEnv] = useState(game.env_vars);
   const [gamemode, setGamemode] = useState(wrapperSet.has("gamemode"));
   const [mangohud, setMangohud] = useState(wrapperSet.has("mangohud"));
+  const [wineBuild, setWineBuild] = useState(game.wine_build);
+  const [builds, setBuilds] = useState<WineBuild[]>([]);
   const [saving, setSaving] = useState(false);
+  const isWindows = game.runner === "proton";
+
+  useEffect(() => {
+    if (!isWindows) return;
+    api
+      .listWineBuilds()
+      .then(setBuilds)
+      .catch((e) => onError(String(e)));
+  }, [isWindows, onError]);
 
   const dirty =
     args !== game.launch_args ||
     env !== game.env_vars ||
     gamemode !== wrapperSet.has("gamemode") ||
-    mangohud !== wrapperSet.has("mangohud");
+    mangohud !== wrapperSet.has("mangohud") ||
+    wineBuild !== game.wine_build;
 
   const save = async () => {
     setSaving(true);
@@ -252,7 +275,7 @@ function LaunchOptions({
       const wrappers = [gamemode && "gamemode", mangohud && "mangohud"]
         .filter(Boolean)
         .join(",");
-      await api.updateLaunchOptions(game.id, args, env, wrappers);
+      await api.updateLaunchOptions(game.id, args, env, wrappers, wineBuild);
       onNotice("Launch options saved");
       onChanged();
     } catch (e) {
@@ -272,6 +295,27 @@ function LaunchOptions({
           </button>
         )}
       </div>
+
+      {isWindows && (
+        <label className="mt-4 block text-xs font-medium text-t2">
+          Wine / Proton build
+          <select
+            value={wineBuild ?? ""}
+            onChange={(e) => setWineBuild(e.target.value || null)}
+            className="input mt-1.5 w-full"
+          >
+            <option value="">Default ({defaultWine ?? "automatic — umu picks UMU-Proton"})</option>
+            {builds.map((b) => (
+              <option key={b.name} value={b.name}>
+                {b.name} · {b.kind === "proton" ? "Proton" : "Wine"}
+              </option>
+            ))}
+            {wineBuild && !builds.some((b) => b.name === wineBuild) && (
+              <option value={wineBuild}>{wineBuild} · not installed on this machine</option>
+            )}
+          </select>
+        </label>
+      )}
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <label className="block text-xs font-medium text-t2">

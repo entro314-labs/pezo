@@ -5,8 +5,8 @@ use std::process::Command;
 use walkdir::WalkDir;
 
 use crate::classify::{
-    Classification, classify_dir, find_inner_archive, find_setup_exe, multipart_gaps,
-    multipart_role, steam_common_dir,
+    Classification, InstallerTech, classify_dir, find_inner_archive, find_setup_exe,
+    installer_tech, is_repack, multipart_gaps, multipart_role, steam_common_dir,
 };
 use crate::config::LibraryPaths;
 use crate::covers;
@@ -16,6 +16,7 @@ use crate::desktop;
 use crate::error::{CoreError, Result, io_err};
 use crate::model::{Candidate, CandidateKind, Game, NewGame, Runner};
 use crate::naming::slugify;
+use crate::wine::{self, WineCommand};
 
 /// Coarse install phases, surfaced to the UI while an install runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,7 @@ pub enum InstallStage {
     Extracting,
     Copying,
     RunningInstaller,
+    InstallingRuntimes,
     Registering,
 }
 
@@ -32,6 +34,7 @@ impl InstallStage {
             Self::Extracting => "extracting",
             Self::Copying => "copying",
             Self::RunningInstaller => "running-installer",
+            Self::InstallingRuntimes => "installing-runtimes",
             Self::Registering => "registering",
         }
     }
@@ -44,6 +47,10 @@ pub struct InstallOptions<'a> {
     pub adopt_portables: bool,
     /// Called as the install moves between phases.
     pub progress: Option<&'a dyn Fn(InstallStage)>,
+    /// Wine/Proton build that runs Windows installers (None → umu's default).
+    pub default_wine: Option<&'a str>,
+    /// Show Windows installers' own UI instead of running them unattended.
+    pub interactive: bool,
 }
 
 impl InstallOptions<'_> {
@@ -95,6 +102,28 @@ pub fn install_candidate(
     db.link_candidate(candidate.id, game.id)?;
     tracing::info!(game = %game.title, runner = game.runner.as_str(), "installed");
     Ok(game)
+}
+
+/// Post-install niceties, best-effort: cover art and a desktop launcher whose
+/// `Exec` line is `exec` (the frontend's own launch command). Returns the
+/// launcher's path when one was written.
+pub fn finish_install(paths: &LibraryPaths, game: &Game, exec: &str) -> Option<PathBuf> {
+    let steam_appid = match game.store.as_deref() {
+        Some("gog") => None,
+        _ => game.store_id.as_deref(),
+    };
+    let cover =
+        covers::fetch_cover(paths, &game.slug, &game.title, steam_appid).unwrap_or_else(|e| {
+            tracing::warn!(slug = %game.slug, "cover fetch failed: {e}");
+            None
+        });
+    match desktop::write_desktop_entry(game, exec, cover.as_deref()) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            tracing::warn!(slug = %game.slug, "desktop entry failed: {e}");
+            None
+        }
+    }
 }
 
 /// Install a specific archive found inside a folder candidate (disc sets and
@@ -162,14 +191,14 @@ fn install_inno(
         "install it via your package manager (e.g. pacman -S innoextract)",
     )?;
 
-    // Folder-wrapped installers: locate the setup exe inside.
-    let installer: PathBuf = if cand.path.is_dir() {
-        find_setup_exe(&cand.path).ok_or_else(|| {
-            CoreError::NotFound(format!("setup exe inside {}", cand.path.display()))
-        })?
-    } else {
-        cand.path.clone()
-    };
+    let installer = setup_exe(cand)?;
+    // Repacks (and other script-driven setups) ship their payload in a format
+    // only their own installer understands: innoextract sees just its temp
+    // files. Those run under Wine instead.
+    if !inno_has_payload(&innoextract, &installer)? {
+        tracing::info!(installer = %installer.display(), "no extractable payload; running installer");
+        return install_windows(db, paths, cand, slug, opts);
+    }
 
     // The GOG product id keys umu's per-game protonfixes.
     let gog_id = gog_game_id(&innoextract, &installer);
@@ -178,37 +207,299 @@ fn install_inno(
     let dest = paths.games.join(slug);
     fs::create_dir_all(&dest).map_err(io_err(&dest))?;
 
+    if let Err(e) = innoextract_into(&innoextract, &installer, &dest) {
+        let _ = fs::remove_dir_all(&dest);
+        return Err(e);
+    }
+    // DLC setups shipped alongside unpack into the same folder, as GOG's
+    // own installer would put them.
+    if let Some(base_id) = &gog_id {
+        let probe = paths.games.join(format!(".pezo-probe-{slug}"));
+        for dlc in gog_dlc_setups(&innoextract, &installer, base_id, &probe) {
+            tracing::info!(dlc = %dlc.display(), "adding DLC");
+            if let Err(e) = innoextract_into(&innoextract, &dlc, &dest) {
+                // The base game is intact; report the DLC and carry on.
+                tracing::warn!(dlc = %dlc.display(), "DLC extraction failed: {e}");
+            }
+        }
+        let _ = fs::remove_dir_all(&probe);
+    }
+
+    let game_root = gog_game_root(&dest);
+
+    opts.stage(InstallStage::Registering);
+    let store = gog_id.is_some().then_some("gog");
+    let game = register_installed_dir(db, paths, cand, &game_root, slug, gog_id, store)?;
+    if game.runner == Runner::Proton {
+        opts.stage(InstallStage::InstallingRuntimes);
+        install_gog_redists(&game, &[&game_root, &dest], opts.default_wine);
+    }
+    Ok(game)
+}
+
+/// Run the runtimes a GOG installer bundles in `__redist` (Visual C++,
+/// DirectX, OpenAL, Unreal prerequisites) silently in the game's prefix, as
+/// GOG's own setup would. Best effort: the game is installed either way, so
+/// failures are logged rather than failing the install. .NET, PhysX and
+/// GOG's script interpreter are skipped — Proton/Wine ship their own .NET
+/// (wine-mono) and PhysX, and winetricks covers the rest.
+fn install_gog_redists(game: &Game, roots: &[&Path], default_wine: Option<&str>) {
+    let Some(redist) = roots
+        .iter()
+        .map(|r| r.join("__redist"))
+        .find(|d| d.is_dir())
+    else {
+        return;
+    };
+    let mut runtimes: Vec<(PathBuf, &'static [&'static str])> = WalkDir::new(&redist)
+        .max_depth(3)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| {
+            let args = redist_args(e.path().strip_prefix(&redist).ok()?)?;
+            Some((e.into_path(), args))
+        })
+        .collect();
+    runtimes.sort();
+    if runtimes.is_empty() {
+        return;
+    }
+    let build = match wine::resolve(game.wine_build.as_deref(), default_wine) {
+        Ok(build) => build,
+        Err(e) => {
+            tracing::warn!(game = %game.slug, "skipping bundled runtimes: {e}");
+            return;
+        }
+    };
+    for (exe, args) in runtimes {
+        let wine_cmd = match crate::launch::game_wine_command(game, build.as_ref()) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                tracing::warn!(game = %game.slug, "skipping bundled runtimes: {e}");
+                return;
+            }
+        };
+        tracing::info!(runtime = %exe.display(), "installing bundled runtime");
+        let status = Command::new(&wine_cmd.argv[0])
+            .args(&wine_cmd.argv[1..])
+            .arg(&exe)
+            .args(args)
+            .envs(wine_cmd.envs)
+            .current_dir(exe.parent().unwrap_or(&redist))
+            .status();
+        match status {
+            // 1638: a newer version is already present; 3010: reboot wanted.
+            Ok(s) if s.success() || matches!(s.code(), Some(1638 | 3010)) => {}
+            Ok(s) => tracing::warn!(runtime = %exe.display(), "runtime installer exited with {s}"),
+            Err(e) => {
+                tracing::warn!(runtime = %exe.display(), "runtime installer failed to start: {e}")
+            }
+        }
+    }
+}
+
+/// Silent-install switches for a runtime in GOG's `__redist`, by its path
+/// relative to that folder. None → not installed (see `install_gog_redists`).
+fn redist_args(rel: &Path) -> Option<&'static [&'static str]> {
+    let lower = rel.to_string_lossy().to_lowercase().replace('\\', "/");
+    let file = lower.rsplit('/').next()?;
+    if !file.ends_with(".exe") {
+        return None;
+    }
+    if file == "dxsetup.exe" {
+        return Some(&["/silent"]);
+    }
+    if file == "oalinst.exe" {
+        return Some(&["/s"]);
+    }
+    if file.starts_with("ue4prereqsetup") {
+        return Some(&["/quiet", "/norestart"]);
+    }
+    let dir = lower.split('/').next()?;
+    let year = dir.strip_prefix("msvc")?.get(..4)?;
+    if !file.starts_with("vc") {
+        return None;
+    }
+    Some(match year {
+        "2005" | "2008" => &["/q"],
+        "2010" => &["/q", "/norestart"],
+        _ => &["/install", "/quiet", "/norestart"],
+    })
+}
+
+/// The installer exe of a candidate (folder-wrapped installers hold it inside).
+fn setup_exe(cand: &Candidate) -> Result<PathBuf> {
+    if cand.path.is_dir() {
+        find_setup_exe(&cand.path)
+            .ok_or_else(|| CoreError::NotFound(format!("setup exe inside {}", cand.path.display())))
+    } else {
+        Ok(cand.path.clone())
+    }
+}
+
+/// Whether innoextract can unpack real files (not just setup temp files)
+/// from an Inno installer.
+fn inno_has_payload(innoextract: &Path, installer: &Path) -> Result<bool> {
+    let output = Command::new(innoextract)
+        .args(["--list", "--exclude-temp", "--gog"])
+        .arg(installer)
+        .output()
+        .map_err(io_err(innoextract))?;
+    if !output.status.success() {
+        return Err(CoreError::CommandFailed {
+            command: format!("innoextract --list {}", installer.display()),
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(listing_has_files(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// innoextract `--list` lines look like ` - "path" (size)`; directories end
+/// in `/` and carry no size.
+fn listing_has_files(listing: &str) -> bool {
+    listing
+        .lines()
+        .any(|line| line.starts_with(" - \"") && !line.trim_end().ends_with("/\""))
+}
+
+/// Where an extracted GOG installer's game lives: next to its
+/// `goggame-<id>.info`. Modern installers put the game at the top and keep a
+/// stub `app/`; older ones put everything under `app/`.
+fn gog_game_root(dest: &Path) -> PathBuf {
+    let app = dest.join("app");
+    if gog_info(dest).is_none()
+        && (gog_info(&app).is_some() || find_main_exe(dest).is_none())
+        && app.is_dir()
+    {
+        return app;
+    }
+    dest.to_path_buf()
+}
+
+fn gog_info(dir: &Path) -> Option<PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            name.starts_with("goggame-") && name.ends_with(".info")
+        })
+}
+
+/// The exe and arguments GOG's own launcher would run: the primary play task
+/// in `goggame-<id>.info`. None when there's no info file or its target is
+/// missing.
+fn gog_play_task(root: &Path) -> Option<(PathBuf, String)> {
+    let info: serde_json::Value = serde_json::from_slice(&fs::read(gog_info(root)?).ok()?).ok()?;
+    let tasks = info.get("playTasks")?.as_array()?;
+    let is_file_task =
+        |t: &&serde_json::Value| t.get("type").and_then(|v| v.as_str()) == Some("FileTask");
+    let task = tasks
+        .iter()
+        .filter(is_file_task)
+        .find(|t| t.get("isPrimary").and_then(|v| v.as_bool()) == Some(true))
+        .or_else(|| tasks.iter().find(is_file_task))?;
+    let rel = task.get("path")?.as_str()?.replace('\\', "/");
+    let exe = root.join(rel);
+    let args = task
+        .get("arguments")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    exe.is_file().then_some((exe, args))
+}
+
+/// The game's launch target in an installed folder: GOG's play task when
+/// present, else the best-guess main exe.
+fn main_exe(root: &Path) -> Option<(PathBuf, String)> {
+    gog_play_task(root).or_else(|| find_main_exe(root).map(|exe| (exe, String::new())))
+}
+
+fn innoextract_into(innoextract: &Path, installer: &Path, dest: &Path) -> Result<()> {
     let output = deprioritized(
-        &innoextract,
+        innoextract,
         &[
             "--gog".as_ref(),
             "--exclude-temp".as_ref(),
-            "--dir".as_ref(),
+            "--output-dir".as_ref(),
             dest.as_os_str(),
             installer.as_os_str(),
         ],
     )
     .output()
-    .map_err(io_err(&innoextract))?;
-    if !output.status.success() {
-        let _ = fs::remove_dir_all(&dest);
-        return Err(CoreError::CommandFailed {
+    .map_err(io_err(innoextract))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(CoreError::CommandFailed {
             command: format!("innoextract {}", installer.display()),
             status: output.status.to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
+        })
     }
+}
 
-    // innoextract usually creates an `app/` dir; treat it as the game root if present.
-    let game_root = if dest.join("app").is_dir() {
-        dest.join("app")
-    } else {
-        dest
+/// GOG setups next to the base installer (same folder, or a subfolder such as
+/// `DLC/`) whose `goggame-<id>.info` names the base game as `rootGameId`.
+/// Other games sharing the folder (episodes, bundles) are left alone.
+fn gog_dlc_setups(
+    innoextract: &Path,
+    installer: &Path,
+    base_id: &str,
+    probe: &Path,
+) -> Vec<PathBuf> {
+    let Some(dir) = installer.parent() else {
+        return Vec::new();
     };
+    WalkDir::new(dir)
+        .max_depth(2)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(|e| e.into_path())
+        .filter(|p| *p != installer)
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            name.starts_with("setup_") && name.ends_with(".exe")
+        })
+        .filter(|p| {
+            let Some(id) = gog_game_id(innoextract, p) else {
+                return false;
+            };
+            id != base_id
+                && gog_root_game_id(innoextract, p, &id, probe).as_deref() == Some(base_id)
+        })
+        .collect()
+}
 
-    opts.stage(InstallStage::Registering);
-    let store = gog_id.is_some().then_some("gog");
-    register_installed_dir(db, paths, cand, &game_root, slug, gog_id, store)
+/// `rootGameId` from a GOG installer's info file, unpacking only that file.
+fn gog_root_game_id(innoextract: &Path, setup: &Path, id: &str, probe: &Path) -> Option<String> {
+    let info = format!("goggame-{id}.info");
+    let _ = fs::remove_dir_all(probe);
+    let status = Command::new(innoextract)
+        .args(["--silent", "--include", &info, "--output-dir"])
+        .arg(probe)
+        .arg(setup)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let path = [probe.join(&info), probe.join("app").join(&info)]
+        .into_iter()
+        .find(|p| p.is_file())?;
+    let json: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    Some(json.get("rootGameId")?.as_str()?.to_string())
 }
 
 /// Ask innoextract for the GOG product id embedded in an installer.
@@ -244,7 +535,10 @@ fn steam_appid(dir: &Path) -> Option<String> {
     None
 }
 
-/// Non-Inno Windows installers: run them interactively inside a fresh prefix via umu.
+/// Installers innoextract can't unpack (repacks, non-Inno setups): run them
+/// interactively inside a fresh prefix with the default Wine/Proton build,
+/// then register what they installed. Inno setups are pointed at
+/// `C:\Games\<slug>` so the game is easy to find afterwards.
 fn install_windows(
     db: &Db,
     paths: &LibraryPaths,
@@ -252,40 +546,84 @@ fn install_windows(
     slug: &str,
     opts: &InstallOptions<'_>,
 ) -> Result<Game> {
-    let umu = deps::require(
-        &["umu-run"],
-        "umu-launcher",
-        "install it to run Windows installers (https://github.com/Open-Wine-Components/umu-launcher)",
-    )?;
-
+    let installer = setup_exe(cand)?;
+    let build = wine::resolve(None, opts.default_wine)?;
     let prefix = paths.prefixes.join(slug);
+    if prefix.exists() {
+        return Err(CoreError::InvalidState(format!(
+            "prefix {} already exists — remove it or the game it belongs to first",
+            prefix.display()
+        )));
+    }
     fs::create_dir_all(&prefix).map_err(io_err(&prefix))?;
+    let result = run_installer_in_prefix(db, cand, slug, opts, &installer, build.as_ref(), &prefix);
+    if result.is_err() {
+        // The prefix exists only for this install; don't leave it behind.
+        let _ = fs::remove_dir_all(&prefix);
+    }
+    result
+}
+
+fn run_installer_in_prefix(
+    db: &Db,
+    cand: &Candidate,
+    slug: &str,
+    opts: &InstallOptions<'_>,
+    installer: &Path,
+    build: Option<&wine::WineBuild>,
+    prefix: &Path,
+) -> Result<Game> {
+    // Repacks always show their UI: unattended, FitGirl's setup stalls under
+    // Proton, and under Wine its 32-bit unpackers run out of address space
+    // and silently roll back — the "Limit installer to 2 GB of RAM" box on
+    // its first page, which has no command-line switch, is the fix.
+    let repack = is_repack(installer);
+    let interactive = opts.interactive || repack;
+    let wine_cmd = WineCommand::new(build, prefix, &format!("umu-{slug}"), None)?;
+    let mut cmd = Command::new(&wine_cmd.argv[0]);
+    cmd.args(&wine_cmd.argv[1..])
+        .args(installer_argv(
+            installer_tech(installer)?,
+            installer,
+            slug,
+            interactive,
+        ))
+        .envs(wine_cmd.envs);
+    // Installers (FitGirl's especially) expect to start in their own folder.
+    if let Some(dir) = installer.parent() {
+        cmd.current_dir(dir);
+    }
 
     opts.stage(InstallStage::RunningInstaller);
-    let status = Command::new(&umu)
-        .arg(&cand.path)
-        .env("WINEPREFIX", &prefix)
-        .env("GAMEID", format!("umu-{slug}"))
-        .status()
-        .map_err(io_err(&umu))?;
+    let status = cmd.status().map_err(io_err(installer))?;
     if !status.success() {
         return Err(CoreError::CommandFailed {
-            command: format!("umu-run {}", cand.path.display()),
+            command: format!(
+                "{} {}",
+                Path::new(&wine_cmd.argv[0]).display(),
+                installer.display()
+            ),
             status: status.to_string(),
-            stderr: "installer exited with a failure status".to_string(),
+            stderr: "installer exited with a failure status (or was cancelled)".to_string(),
         });
     }
 
     opts.stage(InstallStage::Registering);
-    // The game landed somewhere in the prefix; find its main exe.
     let drive_c = prefix.join("drive_c");
-    let exe = find_main_exe(&drive_c).ok_or_else(|| {
+    let install_dir = installed_game_dir(&drive_c, slug).ok_or_else(|| {
+        let hint = if repack {
+            " — repacks roll back silently when unpacking fails: tick \"Limit installer to \
+             2 GB of RAM\" on the installer's first page, and if it still fails try a Wine \
+             build instead of Proton (Settings → Wine & Proton)"
+        } else {
+            ""
+        };
         CoreError::NotFound(format!(
-            "no game executable found under {} after the installer finished",
+            "the installer finished but no game folder with an executable appeared under {}{hint}",
             drive_c.display()
         ))
     })?;
-    let install_dir = exe.parent().unwrap_or(&drive_c).to_path_buf();
+    let (exe, launch_args) = main_exe(&install_dir).ok_or_else(|| no_executable(&install_dir))?;
 
     db.insert_game(&NewGame {
         slug,
@@ -293,11 +631,111 @@ fn install_windows(
         runner: Runner::Proton,
         install_path: &install_dir,
         launch_path: &exe,
-        prefix_path: Some(&prefix),
+        prefix_path: Some(prefix),
         source_path: Some(&cand.path),
         store_id: None,
         store: None,
+        launch_args: &launch_args,
     })
+}
+
+/// Installer command line inside Wine. Every framework is pointed at
+/// `C:\Games\<slug>`; unattended runs add its silent switches. Unknown
+/// installers always show their own UI.
+fn installer_argv(
+    tech: InstallerTech,
+    installer: &Path,
+    slug: &str,
+    interactive: bool,
+) -> Vec<std::ffi::OsString> {
+    let dir = format!("C:\\Games\\{slug}");
+    let mut argv: Vec<std::ffi::OsString> = Vec::new();
+    match tech {
+        InstallerTech::Msi => {
+            argv.extend(["msiexec".into(), "/i".into(), installer.into()]);
+            argv.push(format!("TARGETDIR={dir}").into());
+            if !interactive {
+                argv.push("/qn".into());
+            }
+        }
+        InstallerTech::Inno => {
+            argv.push(installer.into());
+            argv.push(format!("/DIR={dir}").into());
+            if !interactive {
+                for flag in ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"] {
+                    argv.push(flag.into());
+                }
+            }
+        }
+        InstallerTech::Nsis => {
+            argv.push(installer.into());
+            if !interactive {
+                argv.push("/S".into());
+            }
+            // NSIS requires /D last and unquoted.
+            argv.push(format!("/D={dir}").into());
+        }
+        InstallerTech::Other => argv.push(installer.into()),
+    }
+    argv
+}
+
+/// Where an installer put the game inside a fresh prefix: the folder we asked
+/// for (`C:\Games\<slug>`) when it honoured `/DIR`, else the largest
+/// non-Windows folder it created under the usual install locations.
+fn installed_game_dir(drive_c: &Path, slug: &str) -> Option<PathBuf> {
+    let asked = drive_c.join("Games").join(slug);
+    if find_main_exe(&asked).is_some() {
+        return Some(asked);
+    }
+    // Folders a fresh Wine/Proton prefix already has.
+    const PREFIX_DIRS: &[&str] = &[
+        "windows",
+        "users",
+        "programdata",
+        "program files",
+        "program files (x86)",
+        "games",
+        "gog games",
+        "common files",
+        "internet explorer",
+        "windows media player",
+        "windows nt",
+        "windowspowershell",
+        "microsoft.net",
+        "microsoft",
+        "msbuild",
+        "reference assemblies",
+    ];
+    [
+        "",
+        "Games",
+        "GOG Games",
+        "Program Files",
+        "Program Files (x86)",
+    ]
+    .iter()
+    .filter_map(|root| fs::read_dir(drive_c.join(root)).ok())
+    .flat_map(|entries| entries.filter_map(|e| e.ok()))
+    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+    .filter(|e| {
+        let name = e.file_name().to_string_lossy().to_lowercase();
+        !PREFIX_DIRS.contains(&name.as_str())
+    })
+    .map(|e| e.path())
+    .filter(|dir| find_main_exe(dir).is_some())
+    .max_by_key(|dir| tree_size(dir))
+}
+
+fn tree_size(dir: &Path) -> u64 {
+    WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 /// Portable folders / bare exes. Folders found outside the library are copied
@@ -310,7 +748,7 @@ fn register_portable(
     slug: &str,
     opts: &InstallOptions<'_>,
 ) -> Result<Game> {
-    let (install_dir, exe, appid) = if cand.path.is_dir() {
+    let (install_dir, exe, appid, launch_args) = if cand.path.is_dir() {
         // Steam library rips: the game proper lives in steamapps/common/<Game>.
         let appid = steam_appid(&cand.path);
         let source_root = steam_common_dir(&cand.path)
@@ -330,9 +768,8 @@ fn register_portable(
         };
 
         opts.stage(InstallStage::Registering);
-        let exe = find_main_exe(&root)
-            .ok_or_else(|| CoreError::NotFound(format!("no executable in {}", root.display())))?;
-        (root, exe, appid)
+        let (exe, args) = main_exe(&root).ok_or_else(|| no_executable(&root))?;
+        (root, exe, appid, args)
     } else {
         // A bare exe always runs in place — its parent folder is not ours to copy.
         let parent = cand
@@ -340,7 +777,7 @@ fn register_portable(
             .parent()
             .ok_or_else(|| CoreError::InvalidState("exe has no parent directory".into()))?
             .to_path_buf();
-        (parent, cand.path.clone(), None)
+        (parent, cand.path.clone(), None, String::new())
     };
 
     let prefix = paths.prefixes.join(slug);
@@ -354,6 +791,7 @@ fn register_portable(
         source_path: Some(&cand.path),
         store_id: appid,
         store: None,
+        launch_args: &launch_args,
     })
 }
 
@@ -374,6 +812,7 @@ fn register_dos(db: &Db, cand: &Candidate, dir: &Path, slug: &str) -> Result<Gam
         source_path: Some(&cand.path),
         store_id: None,
         store: None,
+        launch_args: "",
     })
 }
 
@@ -388,6 +827,7 @@ fn register_scummvm(db: &Db, cand: &Candidate, dir: &Path, slug: &str) -> Result
         source_path: Some(&cand.path),
         store_id: None,
         store: None,
+        launch_args: "",
     })
 }
 
@@ -541,7 +981,7 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
 /// Wrap a heavy command with idle IO priority and lowered niceness so hour-long
 /// extractions don't make the desktop stutter. Falls back to the bare command
 /// when ionice/nice aren't available.
-fn deprioritized(program: &Path, args: &[&std::ffi::OsStr]) -> Command {
+pub(crate) fn deprioritized(program: &Path, args: &[&std::ffi::OsStr]) -> Command {
     if let Some(ionice) = deps::which("ionice") {
         let mut cmd = Command::new(ionice);
         cmd.args(["-c", "3"]);
@@ -557,7 +997,7 @@ fn deprioritized(program: &Path, args: &[&std::ffi::OsStr]) -> Command {
     }
 }
 
-fn run_extractor(cmd: &mut Command) -> Result<()> {
+pub(crate) fn run_extractor(cmd: &mut Command) -> Result<()> {
     let program = cmd.get_program().to_string_lossy().to_string();
     let output = cmd
         .output()
@@ -607,9 +1047,7 @@ fn register_installed_dir(
                 .map(|common| single_child_dir(&common).unwrap_or(common))
                 .unwrap_or_else(|| dir.to_path_buf());
             let store_id = store_id.or_else(|| steam_appid(dir));
-            let exe = find_main_exe(&root).ok_or_else(|| {
-                CoreError::NotFound(format!("no executable in {}", root.display()))
-            })?;
+            let (exe, launch_args) = main_exe(&root).ok_or_else(|| no_executable(&root))?;
             let prefix = paths.prefixes.join(slug);
             db.insert_game(&NewGame {
                 slug,
@@ -621,6 +1059,7 @@ fn register_installed_dir(
                 source_path: Some(&cand.path),
                 store_id,
                 store,
+                launch_args: &launch_args,
             })
         }
         Classification::Candidate(CandidateKind::Archive | CandidateKind::Unknown)
@@ -630,6 +1069,22 @@ fn register_installed_dir(
             dir.display()
         ))),
     }
+}
+
+/// Error for a folder with no launchable exe. Builder packages (UltraTears and
+/// similar ports) only produce their game exe after their own `setup.bat`
+/// compiles it from the user's dump, so say how to get there.
+fn no_executable(root: &Path) -> CoreError {
+    let builder = ["setup.bat", "setup.py"]
+        .iter()
+        .any(|f| root.join(f).is_file());
+    let hint = if builder {
+        " — this is a builder package: extract it yourself, put your game dump where its \
+         README says, run its setup.bat, then add the folder as a scan folder"
+    } else {
+        ""
+    };
+    CoreError::NotFound(format!("no executable in {}{hint}", root.display()))
 }
 
 /// Heuristic: the "main" exe is a shallow, large exe that isn't a helper/redist.
@@ -648,7 +1103,19 @@ pub fn find_main_exe(dir: &Path) -> Option<PathBuf> {
         "launcher_settings",
         "unitycrashhandler",
     ];
-    const EXCLUDE_DIRS: &[&str] = &["windows", "redist", "directx", "_commonredist", "dosbox"];
+    // Redistributables, and the toolchains recompiled PC ports bundle to build
+    // the game on first run (zig, GCC, clang, Python) or keep build output in.
+    const EXCLUDE_DIRS: &[&str] = &[
+        "windows",
+        "redist",
+        "directx",
+        "_commonredist",
+        "dosbox",
+        "build",
+        "deps",
+        "recompiler",
+        "zig",
+    ];
 
     WalkDir::new(dir)
         .max_depth(4)
@@ -762,6 +1229,176 @@ mod tests {
     }
 
     #[test]
+    fn picks_silent_switches_for_bundled_runtimes() {
+        let args = |p: &str| redist_args(Path::new(p));
+        assert_eq!(
+            args("MSVC2010/vcredist_x86.exe"),
+            Some(&["/q", "/norestart"][..])
+        );
+        assert_eq!(args("MSVC2005/vcredist_x86.exe"), Some(&["/q"][..]));
+        assert_eq!(
+            args("MSVC2022_x64/VC_redist.x64.exe"),
+            Some(&["/install", "/quiet", "/norestart"][..])
+        );
+        assert_eq!(args("DirectX/DXSETUP.exe"), Some(&["/silent"][..]));
+        assert_eq!(args("openAL/oalinst.exe"), Some(&["/s"][..]));
+        assert_eq!(
+            args("UE4REDIST/UE4PrereqSetup_x64.exe"),
+            Some(&["/quiet", "/norestart"][..])
+        );
+        assert_eq!(args("ISI/scriptinterpreter.exe"), None);
+        assert_eq!(
+            args("dotNet472/NDP472-KB4054530-x86-x64-AllOS-ENU.exe"),
+            None
+        );
+        assert_eq!(args("PHYSX/PhysX-9.17.0524-SystemSoftware.exe"), None);
+        assert_eq!(args("DirectX/Feb2010_xinput_x86.cab"), None);
+    }
+
+    #[test]
+    fn installers_get_target_dir_and_silent_switches() {
+        let exe = Path::new("/r/setup.exe");
+        let s = |v: Vec<std::ffi::OsString>| {
+            v.iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            s(installer_argv(InstallerTech::Inno, exe, "vh", false)),
+            [
+                "/r/setup.exe",
+                "/DIR=C:\\Games\\vh",
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/SP-"
+            ]
+        );
+        assert_eq!(
+            s(installer_argv(InstallerTech::Inno, exe, "vh", true)),
+            ["/r/setup.exe", "/DIR=C:\\Games\\vh"]
+        );
+        assert_eq!(
+            s(installer_argv(InstallerTech::Nsis, exe, "vh", false)),
+            ["/r/setup.exe", "/S", "/D=C:\\Games\\vh"]
+        );
+        assert_eq!(
+            s(installer_argv(
+                InstallerTech::Msi,
+                Path::new("/r/g.msi"),
+                "vh",
+                false
+            )),
+            [
+                "msiexec",
+                "/i",
+                "/r/g.msi",
+                "TARGETDIR=C:\\Games\\vh",
+                "/qn"
+            ]
+        );
+        assert_eq!(
+            s(installer_argv(InstallerTech::Other, exe, "vh", false)),
+            ["/r/setup.exe"]
+        );
+    }
+
+    #[test]
+    fn innoextract_listing_detects_real_payload() {
+        // FitGirl: innoextract only sees the installer's own temp files.
+        let repack = "Listing \"Vampire Hunters\" - setup data version 5.5.0.1 (unicode)\nDone.\n";
+        assert!(!listing_has_files(repack));
+        let only_dirs = " - \"app/files/dialogs/de/\"\n - \"app/\"\n";
+        assert!(!listing_has_files(only_dirs));
+        let gog = " - \"app/files/dialogs/de/\"\n - \"Balrum.exe\" (1.2 MiB)\n";
+        assert!(listing_has_files(gog));
+    }
+
+    const BALRUM_INFO: &str = r#"{
+        "gameId": "1769415595",
+        "playTasks": [
+            {"category": "document", "type": "FileTask", "path": "manual.pdf"},
+            {"category": "game", "isPrimary": true, "type": "FileTask",
+             "path": "bin\\x64\\Balrum.exe", "arguments": "-nolauncher"}
+        ]
+    }"#;
+
+    #[test]
+    fn gog_root_is_where_the_info_file_is() {
+        // Modern layout: game at the top, stub app/ holding leftovers.
+        let modern = tempfile::tempdir().expect("tempdir");
+        touch(
+            &modern.path().join("goggame-1.info"),
+            BALRUM_INFO.as_bytes(),
+        );
+        touch(&modern.path().join("Balrum.exe"), b"MZ");
+        touch(&modern.path().join("app/webcache.zip"), b"zip");
+        assert_eq!(gog_game_root(modern.path()), modern.path());
+
+        // Older layout: everything under app/.
+        let old = tempfile::tempdir().expect("tempdir");
+        touch(
+            &old.path().join("app/goggame-1.info"),
+            BALRUM_INFO.as_bytes(),
+        );
+        touch(&old.path().join("app/Game.exe"), b"MZ");
+        touch(&old.path().join("tmp/setup.dll"), b"x");
+        assert_eq!(gog_game_root(old.path()), old.path().join("app"));
+    }
+
+    #[test]
+    fn gog_play_task_names_the_launch_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        touch(
+            &root.join("goggame-1769415595.info"),
+            BALRUM_INFO.as_bytes(),
+        );
+        // A bigger exe the heuristic would otherwise pick.
+        touch(&root.join("Launcher.exe"), &[0u8; 4096]);
+        touch(&root.join("bin/x64/Balrum.exe"), b"MZ");
+        assert_eq!(
+            main_exe(root),
+            Some((root.join("bin/x64/Balrum.exe"), "-nolauncher".to_string()))
+        );
+        // Info pointing at a missing file falls back to the heuristic.
+        fs::remove_file(root.join("bin/x64/Balrum.exe")).expect("rm");
+        assert_eq!(
+            main_exe(root),
+            Some((root.join("Launcher.exe"), String::new()))
+        );
+    }
+
+    #[test]
+    fn finds_what_an_installer_put_in_the_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let c = dir.path();
+        // Stock prefix content.
+        touch(&c.join("windows/system32/notepad.exe"), &[0u8; 8192]);
+        touch(
+            &c.join("Program Files (x86)/Internet Explorer/iexplore.exe"),
+            b"MZ",
+        );
+        touch(&c.join("Program Files/Common Files/x/helper.exe"), b"MZ");
+        // The repack ignored /DIR and picked its own folder.
+        touch(
+            &c.join("Games/Vampire Hunters/VampireHunters.exe"),
+            &[0u8; 2048],
+        );
+        touch(&c.join("Games/Vampire Hunters/data.pak"), &[0u8; 4096]);
+        assert_eq!(
+            installed_game_dir(c, "vampire-hunters"),
+            Some(c.join("Games/Vampire Hunters"))
+        );
+        // The folder we asked for wins when the installer honoured /DIR.
+        touch(&c.join("Games/vampire-hunters/Game.exe"), b"MZ");
+        assert_eq!(
+            installed_game_dir(c, "vampire-hunters"),
+            Some(c.join("Games/vampire-hunters"))
+        );
+    }
+
+    #[test]
     fn main_exe_prefers_large_shallow_and_skips_helpers() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
@@ -769,6 +1406,98 @@ mod tests {
         touch(&root.join("Game.exe"), &[0u8; 100]);
         touch(&root.join("redist").join("vcredist_x64.exe"), &[0u8; 90000]);
         assert_eq!(find_main_exe(root), Some(root.join("Game.exe")));
+    }
+
+    /// Sparse file of `len` bytes: real sizes without writing them.
+    fn sized(path: &Path, len: u64) {
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::File::create(path)
+            .expect("create")
+            .set_len(len)
+            .expect("set_len");
+    }
+
+    /// Exe layouts of static-recompilation PC ports (and one emulator fork),
+    /// from real release archives. The game exe sits next to bundled
+    /// toolchains (zig, GCC, clang, Python) that are often far larger.
+    #[test]
+    fn main_exe_skips_bundled_toolchains_in_recomp_ports() {
+        // (exe path, size) per package, and the exe that should win.
+        type Case<'a> = (&'a [(&'a str, u64)], Option<&'a str>);
+        let cases: &[Case] = &[
+            (
+                &[
+                    ("primerecomp.exe", 10_662_400),
+                    ("primegen/primegen.exe", 2_122_791),
+                    ("zig/zig.exe", 190_064_128),
+                ],
+                Some("primerecomp.exe"),
+            ),
+            (
+                &[
+                    ("savagewind.exe", 12_824_064),
+                    ("Savage Wind Configuration.exe", 82_432),
+                    ("swgen/swgen.exe", 2_579_478),
+                    ("zig/zig.exe", 190_064_128),
+                ],
+                Some("savagewind.exe"),
+            ),
+            (
+                &[
+                    ("Metroid Dread.exe", 10_837_712),
+                    ("recompiler/gcc/Library/bin/gcc.exe", 1_931_278),
+                    ("recompiler/python/python.exe", 93_184),
+                ],
+                Some("Metroid Dread.exe"),
+            ),
+            (
+                &[
+                    ("gow3.exe", 88_381_440),
+                    ("launcher.exe", 1_370_624),
+                    ("builds/gow3-base.exe", 88_381_440),
+                    ("builds/gow3-tu6.exe", 88_470_528),
+                ],
+                Some("gow3.exe"),
+            ),
+            (&[("openhuey.exe", 1_353_728)], Some("openhuey.exe")),
+            (&[("eglantine.exe", 44_299_264)], Some("eglantine.exe")),
+            // UltraTears as shipped by its author, a builder: the game exe
+            // only exists after setup.bat compiles it from the user's dump.
+            (
+                &[
+                    ("build/bc7build.exe", 829_440),
+                    ("deps/clang64/bin/clang.exe", 160_768),
+                    ("deps/python/python.exe", 106_208),
+                    ("deps/shaders/ultrs-shaders.exe", 78_392_882),
+                ],
+                None,
+            ),
+        ];
+        for (files, expected) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            for (rel, len) in *files {
+                sized(&dir.path().join(rel), *len);
+            }
+            assert_eq!(
+                find_main_exe(dir.path()),
+                expected.map(|e| dir.path().join(e)),
+                "{files:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_exe_in_builder_package_explains_setup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("setup.bat"), b"@echo off");
+        let msg = no_executable(dir.path()).to_string();
+        assert!(msg.contains("setup.bat"), "{msg}");
+        let plain = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !no_executable(plain.path())
+                .to_string()
+                .contains("setup.bat")
+        );
     }
 
     #[test]

@@ -58,6 +58,7 @@ fn main() {
             commands::add_scan_dir,
             commands::remove_scan_dir,
             commands::set_adopt_portables,
+            commands::set_interactive_installers,
             commands::doctor,
             commands::desktop_layout,
             commands::installable_tools,
@@ -75,6 +76,12 @@ fn main() {
             commands::fetch_missing_covers,
             commands::update_launch_options,
             commands::run_winetricks,
+            commands::list_wine_builds,
+            commands::wine_sources,
+            commands::list_wine_releases,
+            commands::install_wine_build,
+            commands::remove_wine_build,
+            commands::set_default_wine,
             commands::launch_game,
             commands::remove_game,
         ])
@@ -89,7 +96,7 @@ fn headless_launch(slug: &str) -> i32 {
         let game = db
             .find_game_by_slug(slug)?
             .ok_or_else(|| pezo_core::CoreError::NotFound(format!("game `{slug}`")))?;
-        pezo_core::launch::launch_game(&db, game.id)
+        pezo_core::launch::launch_game(&db, game.id, config.default_wine.as_deref())
     })();
     match result {
         Ok(outcome) => outcome.exit_code.unwrap_or(0),

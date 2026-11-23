@@ -24,18 +24,42 @@ pub struct Config {
     /// them from wherever they were found (survives unplugging that disk).
     #[serde(default = "default_true")]
     pub adopt_portables: bool,
+    /// Wine/Proton build (by name, see [`crate::wine`]) used by Windows games
+    /// that don't pick their own. None → umu-run's default (latest UMU-Proton,
+    /// downloaded by umu on first use).
+    #[serde(default)]
+    pub default_wine: Option<String>,
+    /// Show Windows setup.exe/MSI installers instead of running them
+    /// unattended into `C:\Games\<slug>`. Repacks always show theirs.
+    #[serde(default)]
+    pub interactive_installers: bool,
 }
 
 fn default_true() -> bool {
     true
 }
 
+/// The user's home directory.
+pub fn home_dir() -> Result<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| CoreError::Config("HOME is not set".into()))
+}
+
+/// `$XDG_DATA_HOME`, defaulting to `~/.local/share`.
+pub fn data_home() -> Result<PathBuf> {
+    match env::var_os("XDG_DATA_HOME") {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => Ok(home_dir()?.join(".local").join("share")),
+    }
+}
+
 impl Config {
     pub fn path() -> Result<PathBuf> {
-        let base = env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .ok_or_else(|| CoreError::Config("neither XDG_CONFIG_HOME nor HOME is set".into()))?;
+        let base = match env::var_os("XDG_CONFIG_HOME") {
+            Some(dir) => PathBuf::from(dir),
+            None => home_dir()?.join(".config"),
+        };
         Ok(base.join("pezo").join("config.json"))
     }
 

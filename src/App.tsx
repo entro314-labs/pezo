@@ -241,6 +241,7 @@ export default function App() {
                   game={openGame}
                   cover={covers[openGame.id] ?? null}
                   running={runningGameIds.has(openGame.id)}
+                  defaultWine={config?.default_wine ?? null}
                   onLaunch={launch}
                   onBack={() => setOpenGameId(null)}
                   onChanged={refreshOrToast}

@@ -213,7 +213,7 @@ pub fn classify_dir(dir: &Path) -> Result<Classification> {
         }
         if name.ends_with(".exe") {
             has_exe = true;
-            if name.starts_with("setup_") || name.starts_with("setup ") || name == "setup.exe" {
+            if is_setup_exe_name(&name) {
                 has_installer_exe = true;
             }
         }
@@ -229,7 +229,15 @@ pub fn classify_dir(dir: &Path) -> Result<Classification> {
         // A folder holding an installer (e.g. multi-part GOG download): classify
         // by the installer exe it contains.
         if let Some(setup) = find_setup_exe(dir) {
-            return classify_exe(&setup).map(Classification::Candidate);
+            let kind = classify_exe(&setup)?;
+            let inno = matches!(
+                kind,
+                CandidateKind::InnoInstaller | CandidateKind::GogInstaller
+            );
+            if inno && is_repack(&setup) {
+                return Ok(Classification::Candidate(CandidateKind::WindowsInstaller));
+            }
+            return Ok(Classification::Candidate(kind));
         }
     }
     if has_exe {
@@ -306,20 +314,113 @@ pub fn find_inner_archive(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// `setup.exe`, `setup_<game>.exe` (GOG), `setup-multi6.exe` (FitGirl), `setup <x>.exe`.
+fn is_setup_exe_name(lower_name: &str) -> bool {
+    lower_name.ends_with(".exe")
+        && (lower_name == "setup.exe"
+            || ["setup_", "setup-", "setup "]
+                .iter()
+                .any(|p| lower_name.starts_with(p)))
+}
+
 /// Find the setup exe inside a directory (used for folder-wrapped installers).
+/// Shallowest wins (a repack's own setup beats one in `Redist/`); among
+/// siblings, the one owning `.bin` parts (GOG's base game, not its DLC
+/// setups), then the shortest name.
 pub fn find_setup_exe(dir: &Path) -> Option<std::path::PathBuf> {
     WalkDir::new(dir)
         .max_depth(2)
         .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
-        .find(|e| {
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| is_setup_exe_name(&e.file_name().to_string_lossy().to_lowercase()))
+        .min_by_key(|e| {
             let name = e.file_name().to_string_lossy().to_lowercase();
-            e.file_type().is_file()
-                && name.ends_with(".exe")
-                && (name.starts_with("setup_") || name.starts_with("setup ") || name == "setup.exe")
+            let owns_parts = e.path().parent().is_some_and(|d| {
+                bin_names(d)
+                    .iter()
+                    .any(|bin| owns_part(exe_stem(&name), bin))
+            });
+            (e.depth(), !owns_parts, name.len())
         })
         .map(|e| e.into_path())
+}
+
+/// GOG data parts belonging to a setup: `<stem>.bin` or `<stem>-<n>.bin`.
+fn owns_part(setup_stem: &str, bin_name: &str) -> bool {
+    bin_name
+        .strip_prefix(setup_stem)
+        .and_then(|rest| rest.strip_suffix(".bin"))
+        .is_some_and(|n| {
+            n.is_empty()
+                || n.strip_prefix('-')
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
+
+fn exe_stem(lower_name: &str) -> &str {
+    lower_name.strip_suffix(".exe").unwrap_or(lower_name)
+}
+
+/// Lowercase names of the `.bin` files directly inside `dir`.
+fn bin_names(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_lowercase())
+                .filter(|n| n.ends_with(".bin"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A repack (FitGirl, xatab, …): an Inno setup next to `.bin` payload that no
+/// setup in the folder owns by GOG's naming (`fg-01.bin`, `data1.bin`,
+/// `setup-fitgirl-01.bin`). The payload is compressed with tools innoextract
+/// can't unpack, so a repack has to run its own installer under Wine.
+pub fn is_repack(setup: &Path) -> bool {
+    let Some(dir) = setup.parent() else {
+        return false;
+    };
+    let stems: Vec<String> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_lowercase())
+                .filter(|n| is_setup_exe_name(n))
+                .map(|n| exe_stem(&n).to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    bin_names(dir)
+        .iter()
+        .any(|bin| !stems.iter().any(|stem| owns_part(stem, bin)))
+}
+
+/// Installer framework, which decides the command-line switches it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallerTech {
+    Inno,
+    Nsis,
+    Msi,
+    Other,
+}
+
+/// Which installer framework built a setup file.
+pub fn installer_tech(path: &Path) -> Result<InstallerTech> {
+    if extension_lower(path) == "msi" {
+        return Ok(InstallerTech::Msi);
+    }
+    let head = read_head(path, EXE_SCAN_WINDOW)?;
+    Ok(if contains(&head, b"Inno Setup") {
+        InstallerTech::Inno
+    } else if contains(&head, b"Nullsoft") {
+        InstallerTech::Nsis
+    } else {
+        InstallerTech::Other
+    })
 }
 
 fn classify_exe(path: &Path) -> Result<CandidateKind> {
@@ -402,6 +503,101 @@ mod tests {
         assert_eq!(
             classify(&exe).expect("classify"),
             Classification::Candidate(CandidateKind::InnoInstaller)
+        );
+    }
+
+    #[test]
+    fn repacks_run_their_installer_gog_folders_extract() {
+        let inno = b"MZ....Inno Setup Setup Data (5.5.0)....";
+        let cases: &[(&[&str], CandidateKind)] = &[
+            // FitGirl, current naming.
+            (
+                &["setup.exe", "fg-01.bin", "fg-02.bin"],
+                CandidateKind::WindowsInstaller,
+            ),
+            // FitGirl, older naming — the setup isn't called setup.exe.
+            (
+                &["setup-multi6.exe", "setup-fitgirl-01.bin"],
+                CandidateKind::WindowsInstaller,
+            ),
+            // FitGirl with setup.exe + setup-fitgirl-NN.bin.
+            (
+                &[
+                    "setup.exe",
+                    "setup-fitgirl-01.bin",
+                    "setup-fitgirl-selective-english.bin",
+                ],
+                CandidateKind::WindowsInstaller,
+            ),
+            // xatab.
+            (
+                &["setup.exe", "Data1.bin", "Data-eng.bin"],
+                CandidateKind::WindowsInstaller,
+            ),
+            // GOG multi-part offline installer.
+            (
+                &[
+                    "setup_haven_1.1_(54386).exe",
+                    "setup_haven_1.1_(54386)-1.bin",
+                ],
+                CandidateKind::GogInstaller,
+            ),
+            // GOG base game plus DLC setups; old single-part `.bin` naming.
+            (
+                &[
+                    "setup_ballisticng_1.4_(81950).exe",
+                    "setup_ballisticng_1.4_(81950)-1.bin",
+                    "setup_ballisticng_-_bling_pack_1.4_(81950).exe",
+                    "setup_grimm_season3_2.2.exe",
+                    "setup_grimm_season3_2.2.bin",
+                ],
+                CandidateKind::GogInstaller,
+            ),
+            // Single-file Inno installer.
+            (&["setup.exe"], CandidateKind::InnoInstaller),
+        ];
+        for (files, expected) in cases {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let dir = tmp.path().join("Some Game [Repack]");
+            for f in *files {
+                let contents: &[u8] = if f.ends_with(".exe") { inno } else { b"data" };
+                touch(&dir.join(f), contents);
+            }
+            assert_eq!(
+                classify(&dir).expect("classify"),
+                Classification::Candidate(*expected),
+                "{files:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gog_base_setup_wins_over_its_dlc_setups() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(
+            &dir.path()
+                .join("setup_ballisticng_-_bling_pack_1.4_(81950).exe"),
+            b"MZ",
+        );
+        touch(&dir.path().join("setup_ballisticng_1.4_(81950).exe"), b"MZ");
+        touch(
+            &dir.path().join("setup_ballisticng_1.4_(81950)-1.bin"),
+            b"x",
+        );
+        assert_eq!(
+            find_setup_exe(dir.path()),
+            Some(dir.path().join("setup_ballisticng_1.4_(81950).exe"))
+        );
+    }
+
+    #[test]
+    fn repack_setup_wins_over_redist_setups() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("Redist/setup_dx.exe"), b"MZ");
+        touch(&dir.path().join("setup.exe"), b"MZ");
+        assert_eq!(
+            find_setup_exe(dir.path()),
+            Some(dir.path().join("setup.exe"))
         );
     }
 

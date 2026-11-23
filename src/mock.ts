@@ -1,6 +1,6 @@
 // Dev-only mock backend: `pnpm dev` + open http://localhost:1420/?mock
 // Lets the UI render in a plain browser (no Tauri) for design work.
-import type { AppConfig, Candidate, Game, QueueTask } from "./types";
+import type { AppConfig, Candidate, Game, QueueTask, WineBuild, WineRelease } from "./types";
 
 /** Tiny event bus standing in for Tauri's event system. */
 const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
@@ -93,6 +93,7 @@ const games: Game[] = [
   launch_args: "",
   env_vars: "",
   wrappers: i === 1 ? "gamemode,mangohud" : "",
+  wine_build: i === 1 ? "GE-Proton11-7" : null,
 })) as Game[];
 
 const kinds = [
@@ -136,7 +137,16 @@ const config: AppConfig = {
   library_root: "/mnt/games",
   scan_dirs: ["/run/media/user/WD 6TB/GOG", "/run/media/user/Steam and Gaming"],
   adopt_portables: true,
+  default_wine: null,
+  interactive_installers: false,
 };
+
+const wineBuilds: WineBuild[] = [
+  { name: "GE-Proton11-7", kind: "proton", path: "/home/user/.local/share/Steam/compatibilitytools.d/GE-Proton11-7", source: "compat-tools", removable: true },
+  { name: "proton-cachyos-slr", kind: "proton", path: "/usr/share/steam/compatibilitytools.d/proton-cachyos-slr", source: "compat-tools", removable: false },
+  { name: "wine-11.19-amd64-wow64", kind: "wine", path: "/home/user/.local/share/pezo/wine/wine-11.19-amd64-wow64", source: "pezo", removable: true },
+  { name: "system", kind: "wine", path: "/usr", source: "system", removable: false },
+];
 
 const covers: Record<number, string> = Object.fromEntries(
   games.map((g, i) => [g.id, svgCover(g.title.split(" ")[0], (i * 67) % 360)]),
@@ -218,6 +228,48 @@ export async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
       return (covers[(args as { gameId: number }).gameId] ?? null) as T;
     case "scan_installers":
       return { discovered: candidates, ignored: 4, pruned: 0, offline: [] } as T;
+    case "list_wine_builds":
+      return wineBuilds as T;
+    case "wine_sources":
+      return [
+        { id: "ge-proton", name: "GE-Proton", kind: "proton", description: "Proton with extra media codecs and game fixes — the usual first pick" },
+        { id: "wine", name: "Wine", kind: "wine", description: "Upstream Wine (Kron4ek build, WoW64 — no 32-bit system libraries needed)" },
+      ] as T;
+    case "list_wine_releases": {
+      const { source } = args as { source: string };
+      return [7, 6, 5].map((n) => ({
+        source,
+        tag: source === "wine" ? `11.1${n}` : `GE-Proton11-${n}`,
+        asset: source === "wine" ? `wine-11.1${n}-amd64-wow64.tar.xz` : `GE-Proton11-${n}-x86_64.tar.gz`,
+        size: 5.4e8,
+        published_at: `2026-10-0${n}T12:00:00Z`,
+        prerelease: false,
+        installed: source !== "wine" && n === 7,
+      })) as WineRelease[] as T;
+    }
+    case "install_wine_build": {
+      const { tag } = args as { source: string; tag: string };
+      const total = 5.4e8;
+      for (let i = 1; i <= 5; i++) {
+        await new Promise((r) => setTimeout(r, 300));
+        emitMock("wine-install-progress", { source: "", tag, progress: { stage: "downloading", done: (total * i) / 5, total } });
+      }
+      emitMock("wine-install-progress", { source: "", tag, progress: { stage: "extracting" } });
+      await new Promise((r) => setTimeout(r, 400));
+      const build: WineBuild = { name: tag, kind: "proton", path: `/home/user/.local/share/Steam/compatibilitytools.d/${tag}`, source: "compat-tools", removable: true };
+      wineBuilds.unshift(build);
+      return build as T;
+    }
+    case "remove_wine_build": {
+      const { name } = args as { name: string };
+      const index = wineBuilds.findIndex((b) => b.name === name);
+      if (index >= 0) wineBuilds.splice(index, 1);
+      if (config.default_wine === name) config.default_wine = null;
+      return config as T;
+    }
+    case "set_default_wine":
+      config.default_wine = (args as { name: string | null }).name;
+      return config as T;
     case "list_candidate_archives":
       return [
         "/run/media/user/WD 6TB/Games/M&M(L)/mm6.iso",

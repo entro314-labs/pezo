@@ -61,7 +61,7 @@ impl CandidateKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Runner {
-    /// Proton via umu-launcher.
+    /// Windows games: Proton via umu-launcher, or a plain Wine build.
     Proton,
     Dosbox,
     Scummvm,
@@ -129,6 +129,9 @@ pub struct Game {
     pub env_vars: String,
     /// Comma-separated launch wrappers ("gamemode", "mangohud").
     pub wrappers: String,
+    /// Wine/Proton build name (see [`crate::wine`]). None → the configured
+    /// default.
+    pub wine_build: Option<String>,
 }
 
 /// Fields required to register a new game.
@@ -143,4 +146,6 @@ pub struct NewGame<'a> {
     pub source_path: Option<&'a std::path::Path>,
     pub store_id: Option<String>,
     pub store: Option<&'a str>,
+    /// Arguments the game needs (e.g. from GOG's play task); usually empty.
+    pub launch_args: &'a str,
 }

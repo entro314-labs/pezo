@@ -16,6 +16,10 @@ export interface AppConfig {
   library_root: string | null;
   scan_dirs: string[];
   adopt_portables: boolean;
+  /** Wine/Proton build for games without their own pick; null → umu's default. */
+  default_wine: string | null;
+  /** Show Windows installers' own UI instead of running them unattended. */
+  interactive_installers: boolean;
 }
 
 export interface FsInfo {
@@ -56,6 +60,8 @@ export interface Game {
   launch_args: string;
   env_vars: string;
   wrappers: string;
+  /** Wine/Proton build name; null → the configured default. */
+  wine_build: string | null;
 }
 
 export interface ScanOutcome {
@@ -71,7 +77,12 @@ export interface ScanProgress {
   total: number;
 }
 
-export type InstallStage = "extracting" | "copying" | "running-installer" | "registering";
+export type InstallStage =
+  | "extracting"
+  | "copying"
+  | "running-installer"
+  | "installing-runtimes"
+  | "registering";
 
 /** One entry in the sequential install queue. */
 export interface QueueTask {
@@ -96,6 +107,57 @@ export interface ToolStatus {
   required: boolean;
 }
 
+export type WineKind = "proton" | "wine";
+
+export type BuildSource = "compat-tools" | "steam" | "umu" | "lutris" | "pezo" | "system";
+
+/** An installed Wine or Proton build. */
+export interface WineBuild {
+  name: string;
+  kind: WineKind;
+  path: string;
+  source: BuildSource;
+  removable: boolean;
+}
+
+/** A project Pezo can download builds from. */
+export interface WineSource {
+  id: string;
+  name: string;
+  kind: WineKind;
+  description: string;
+}
+
+export interface WineRelease {
+  source: string;
+  tag: string;
+  asset: string;
+  size: number;
+  published_at: string | null;
+  prerelease: boolean;
+  installed: boolean;
+}
+
+export type WineInstallProgress =
+  | { stage: "downloading"; done: number; total: number }
+  | { stage: "verifying" }
+  | { stage: "extracting" };
+
+export interface WineInstallEvent {
+  source: string;
+  tag: string | null;
+  progress: WineInstallProgress;
+}
+
+export const BUILD_SOURCE_LABELS: Record<BuildSource, string> = {
+  "compat-tools": "compatibilitytools.d",
+  steam: "Steam",
+  umu: "umu",
+  lutris: "Lutris",
+  pezo: "Pezo",
+  system: "System",
+};
+
 export interface GameExited {
   outcome: { game_id: number; exit_code: number | null; seconds: number } | null;
   error: string | null;
@@ -117,11 +179,12 @@ export const STAGE_LABELS: Record<InstallStage, string> = {
   extracting: "Extracting…",
   copying: "Copying…",
   "running-installer": "Installer running…",
+  "installing-runtimes": "Installing runtimes…",
   registering: "Registering…",
 };
 
 export const RUNNER_LABELS: Record<Runner, string> = {
-  proton: "Proton",
+  proton: "Wine/Proton",
   dosbox: "DOSBox",
   scummvm: "ScummVM",
 };

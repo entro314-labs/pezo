@@ -12,6 +12,10 @@ import type {
   ScanOutcome,
   ScanProgress,
   ToolStatus,
+  WineBuild,
+  WineInstallEvent,
+  WineRelease,
+  WineSource,
 } from "./types";
 
 const invoke: typeof tauriInvoke = mockEnabled ? mockInvoke : tauriInvoke;
@@ -27,6 +31,8 @@ export const api = {
   removeScanDir: (path: string) => invoke<AppConfig>("remove_scan_dir", { path }),
   setAdoptPortables: (enabled: boolean) =>
     invoke<AppConfig>("set_adopt_portables", { enabled }),
+  setInteractiveInstallers: (enabled: boolean) =>
+    invoke<AppConfig>("set_interactive_installers", { enabled }),
   doctor: () => invoke<ToolStatus[]>("doctor"),
   desktopLayout: () => invoke<DesktopLayout>("desktop_layout"),
   installableTools: () => invoke<string[]>("installable_tools"),
@@ -49,8 +55,23 @@ export const api = {
     launchArgs: string,
     envVars: string,
     wrappers: string,
-  ) => invoke<Game>("update_launch_options", { gameId, launchArgs, envVars, wrappers }),
+    wineBuild: string | null,
+  ) =>
+    invoke<Game>("update_launch_options", {
+      gameId,
+      launchArgs,
+      envVars,
+      wrappers,
+      wineBuild,
+    }),
   runWinetricks: (gameId: number) => invoke<void>("run_winetricks", { gameId }),
+  listWineBuilds: () => invoke<WineBuild[]>("list_wine_builds"),
+  wineSources: () => invoke<WineSource[]>("wine_sources"),
+  listWineReleases: (source: string) => invoke<WineRelease[]>("list_wine_releases", { source }),
+  installWineBuild: (source: string, tag: string | null) =>
+    invoke<WineBuild>("install_wine_build", { source, tag }),
+  removeWineBuild: (name: string) => invoke<AppConfig>("remove_wine_build", { name }),
+  setDefaultWine: (name: string | null) => invoke<AppConfig>("set_default_wine", { name }),
   launch: (gameId: number) => invoke<void>("launch_game", { gameId }),
   removeGame: (gameId: number, deleteFiles: boolean) =>
     invoke<void>("remove_game", { gameId, deleteFiles }),
@@ -60,6 +81,8 @@ export const api = {
     listen<ScanProgress>("scan-progress", (event) => handler(event.payload)),
   onQueueChanged: (handler: (tasks: QueueTask[]) => void): Promise<UnlistenFn> =>
     listen<QueueTask[]>("queue-changed", (event) => handler(event.payload)),
+  onWineInstallProgress: (handler: (e: WineInstallEvent) => void): Promise<UnlistenFn> =>
+    listen<WineInstallEvent>("wine-install-progress", (event) => handler(event.payload)),
 };
 
 export function humanSize(bytes: number): string {

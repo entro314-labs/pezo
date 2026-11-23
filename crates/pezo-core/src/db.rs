@@ -76,6 +76,18 @@ impl Db {
                 "#,
             )?;
         }
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 3 {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE games ADD COLUMN wine_build TEXT;
+
+                PRAGMA user_version = 3;
+                "#,
+            )?;
+        }
         Ok(())
     }
 
@@ -188,8 +200,8 @@ impl Db {
         let id: i64 = self.conn.query_row(
             r#"
             INSERT INTO games (slug, title, runner, install_path, launch_path,
-                               prefix_path, source_path, store_id, store)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                               prefix_path, source_path, store_id, store, launch_args)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             RETURNING id
             "#,
             params![
@@ -202,23 +214,27 @@ impl Db {
                 new.source_path.map(path_str).transpose()?,
                 new.store_id,
                 new.store,
+                new.launch_args,
             ],
             |r| r.get(0),
         )?;
         self.get_game(id)
     }
 
-    /// Update per-game launch customization (args, env lines, wrapper list).
+    /// Update per-game launch customization (args, env lines, wrapper list,
+    /// Wine/Proton build — None follows the configured default).
     pub fn update_launch_options(
         &self,
         game_id: i64,
         launch_args: &str,
         env_vars: &str,
         wrappers: &str,
+        wine_build: Option<&str>,
     ) -> Result<()> {
         let n = self.conn.execute(
-            "UPDATE games SET launch_args = ?2, env_vars = ?3, wrappers = ?4 WHERE id = ?1",
-            params![game_id, launch_args, env_vars, wrappers],
+            "UPDATE games SET launch_args = ?2, env_vars = ?3, wrappers = ?4, wine_build = ?5
+             WHERE id = ?1",
+            params![game_id, launch_args, env_vars, wrappers, wine_build],
         )?;
         if n == 0 {
             return Err(CoreError::NotFound(format!("game {game_id}")));
@@ -230,7 +246,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, slug, title, runner, install_path, launch_path, prefix_path,
                     source_path, added_at, last_played_at, play_seconds,
-                    store_id, store, launch_args, env_vars, wrappers
+                    store_id, store, launch_args, env_vars, wrappers, wine_build
              FROM games ORDER BY title COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], row_to_game)?;
@@ -246,7 +262,7 @@ impl Db {
             .query_row(
                 "SELECT id, slug, title, runner, install_path, launch_path, prefix_path,
                         source_path, added_at, last_played_at, play_seconds,
-                        store_id, store, launch_args, env_vars, wrappers
+                        store_id, store, launch_args, env_vars, wrappers, wine_build
                  FROM games WHERE id = ?1",
                 params![id],
                 row_to_game,
@@ -261,7 +277,7 @@ impl Db {
             .query_row(
                 "SELECT id, slug, title, runner, install_path, launch_path, prefix_path,
                         source_path, added_at, last_played_at, play_seconds,
-                        store_id, store, launch_args, env_vars, wrappers
+                        store_id, store, launch_args, env_vars, wrappers, wine_build
                  FROM games WHERE slug = ?1",
                 params![slug],
                 row_to_game,
@@ -345,5 +361,43 @@ fn row_to_game(r: &rusqlite::Row<'_>) -> rusqlite::Result<Game> {
         launch_args: r.get(13)?,
         env_vars: r.get(14)?,
         wrappers: r.get(15)?,
+        wine_build: r.get(16)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stores_a_games_wine_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&dir.path().join("pezo.db")).expect("open");
+        let game = db
+            .insert_game(&NewGame {
+                slug: "hades",
+                title: "Hades",
+                runner: Runner::Proton,
+                install_path: Path::new("/games/hades"),
+                launch_path: Path::new("/games/hades/Hades.exe"),
+                prefix_path: Some(Path::new("/games/prefixes/hades")),
+                source_path: None,
+                store_id: None,
+                store: None,
+                launch_args: "",
+            })
+            .expect("insert");
+        assert_eq!(game.wine_build, None);
+
+        db.update_launch_options(game.id, "", "", "", Some("GE-Proton11-7"))
+            .expect("update");
+        assert_eq!(
+            db.get_game(game.id).expect("get").wine_build.as_deref(),
+            Some("GE-Proton11-7")
+        );
+
+        db.update_launch_options(game.id, "", "", "", None)
+            .expect("reset");
+        assert_eq!(db.get_game(game.id).expect("get").wine_build, None);
+    }
 }

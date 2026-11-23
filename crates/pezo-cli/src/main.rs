@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use pezo_core::{Config, install, launch, open_library, scan};
+use pezo_core::wine::{self, InstallProgress};
+use pezo_core::{Config, Db, Game, install, launch, open_library, scan};
 
 #[derive(Parser)]
 #[command(
@@ -35,7 +36,12 @@ enum Cmd {
     /// List scanned, installable items
     Candidates,
     /// Install a candidate by id
-    Install { candidate_id: i64 },
+    Install {
+        candidate_id: i64,
+        /// Show Windows installers' own UI instead of running them unattended
+        #[arg(long)]
+        interactive: bool,
+    },
     /// List installed games
     Games,
     /// Launch a game by id or slug (blocks until it exits, records playtime)
@@ -45,6 +51,31 @@ enum Cmd {
     },
     /// Show the current configuration
     Config,
+    /// Manage Wine and Proton builds
+    Wine {
+        #[command(subcommand)]
+        command: WineCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum WineCmd {
+    /// List installed Wine/Proton builds
+    List,
+    /// List downloadable releases of a source (omit it to list the sources)
+    Available { source: Option<String> },
+    /// Download and install a release (latest stable unless a tag is given)
+    Install { source: String, tag: Option<String> },
+    /// Delete a build Pezo is allowed to remove
+    Remove { name: String },
+    /// Set the build games use unless they pick their own (`umu` = umu-run's default)
+    Default { name: String },
+    /// Pick the build one game runs with (`default` = follow the default)
+    Use {
+        /// Game id or slug
+        game: String,
+        name: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -62,10 +93,14 @@ fn main() -> anyhow::Result<()> {
         Cmd::Doctor => cmd_doctor(),
         Cmd::Scan { dir, full } => cmd_scan(dir, full),
         Cmd::Candidates => cmd_candidates(),
-        Cmd::Install { candidate_id } => cmd_install(candidate_id),
+        Cmd::Install {
+            candidate_id,
+            interactive,
+        } => cmd_install(candidate_id, interactive),
         Cmd::Games => cmd_games(),
         Cmd::Launch { game } => cmd_launch(&game),
         Cmd::Config => cmd_config(),
+        Cmd::Wine { command } => cmd_wine(command),
     }
 }
 
@@ -179,14 +214,21 @@ fn cmd_candidates() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_install(candidate_id: i64) -> anyhow::Result<()> {
+fn cmd_install(candidate_id: i64, interactive: bool) -> anyhow::Result<()> {
     let config = Config::load()?;
     let (paths, db) = open_library(&config)?;
     let opts = install::InstallOptions {
         adopt_portables: config.adopt_portables,
         progress: Some(&|stage| println!("… {}", stage.as_str())),
+        default_wine: config.default_wine.as_deref(),
+        interactive: interactive || config.interactive_installers,
     };
     let game = install::install_candidate(&db, &paths, candidate_id, &opts)?;
+    let exe = std::env::current_exe().context("cannot locate the pezo binary")?;
+    let exec = format!("\"{}\" launch {}", exe.display(), game.slug);
+    if let Some(entry) = install::finish_install(&paths, &game, &exec) {
+        println!("desktop launcher: {}", entry.display());
+    }
     println!(
         "installed `{}` (#{}) — runner: {}, launch: {}",
         game.title,
@@ -228,16 +270,20 @@ fn cmd_games() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_launch(game_ref: &str) -> anyhow::Result<()> {
-    let config = Config::load()?;
-    let (_, db) = open_library(&config)?;
-    let game = match game_ref.parse::<i64>() {
+fn find_game(db: &Db, game_ref: &str) -> anyhow::Result<Game> {
+    Ok(match game_ref.parse::<i64>() {
         Ok(id) => db.get_game(id)?,
         Err(_) => db
             .find_game_by_slug(game_ref)?
             .with_context(|| format!("no game with slug `{game_ref}`"))?,
-    };
-    let outcome = launch::launch_game(&db, game.id)?;
+    })
+}
+
+fn cmd_launch(game_ref: &str) -> anyhow::Result<()> {
+    let config = Config::load()?;
+    let (_, db) = open_library(&config)?;
+    let game = find_game(&db, game_ref)?;
+    let outcome = launch::launch_game(&db, game.id, config.default_wine.as_deref())?;
     println!(
         "`{}` exited (code {:?}) after {}m{:02}s",
         game.title,
@@ -260,6 +306,101 @@ fn cmd_config() -> anyhow::Result<()> {
             print!(" — WARNING: Proton/Wine prefixes misbehave on this filesystem");
         }
         println!();
+    }
+    Ok(())
+}
+
+fn cmd_wine(command: WineCmd) -> anyhow::Result<()> {
+    let mut config = Config::load()?;
+    match command {
+        WineCmd::List => {
+            let default = config.default_wine.as_deref();
+            let mark = if default.is_none() { "*" } else { " " };
+            println!("{mark} umu (latest UMU-Proton, downloaded by umu-run)");
+            for b in wine::detect()? {
+                let mark = if default == Some(b.name.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
+                println!(
+                    "{mark} {:<36} {:<7} {}",
+                    b.name,
+                    b.kind.as_str(),
+                    b.path.display()
+                );
+            }
+        }
+        WineCmd::Available { source: None } => {
+            for s in wine::SOURCES {
+                println!("{:<18} {}", s.id, s.description);
+            }
+        }
+        WineCmd::Available {
+            source: Some(source),
+        } => {
+            for r in wine::list_releases(&source)? {
+                println!(
+                    "{:<36} {:>9}  {}{}",
+                    r.tag,
+                    human_size(r.size),
+                    r.published_at
+                        .as_deref()
+                        .unwrap_or("")
+                        .get(..10)
+                        .unwrap_or(""),
+                    match (r.installed, r.prerelease) {
+                        (true, _) => "  installed",
+                        (false, true) => "  prerelease",
+                        _ => "",
+                    }
+                );
+            }
+        }
+        WineCmd::Install { source, tag } => {
+            let report = |p: InstallProgress| match p {
+                InstallProgress::Downloading { done, total } => {
+                    eprint!(
+                        "\r… downloading {} / {}   ",
+                        human_size(done),
+                        human_size(total)
+                    );
+                }
+                InstallProgress::Verifying => eprintln!("\n… verifying checksum"),
+                InstallProgress::Extracting => eprintln!("… extracting"),
+            };
+            let build = wine::install_release(&source, tag.as_deref(), &report)?;
+            println!("installed {} at {}", build.name, build.path.display());
+        }
+        WineCmd::Remove { name } => {
+            wine::remove(&mut config, &name)?;
+            println!("removed {name}");
+        }
+        WineCmd::Default { name } => {
+            let name = (name != "umu").then_some(name);
+            wine::set_default(&mut config, name.as_deref())?;
+            println!("default: {}", name.as_deref().unwrap_or("umu"));
+        }
+        WineCmd::Use { game, name } => {
+            let (_, db) = open_library(&config)?;
+            let game = find_game(&db, &game)?;
+            let name = (name != "default").then_some(name);
+            if let Some(name) = &name {
+                wine::find(name)?;
+            }
+            db.update_launch_options(
+                game.id,
+                &game.launch_args,
+                &game.env_vars,
+                &game.wrappers,
+                name.as_deref(),
+            )?;
+            println!(
+                "`{}` now runs with {}",
+                game.title,
+                name.as_deref().unwrap_or("the default build")
+            );
+        }
     }
     Ok(())
 }
