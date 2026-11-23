@@ -2,7 +2,7 @@
 # Matches every other app in the fleet. CI runs `cargo fmt --check` and
 # `cargo clippy -D warnings` under THIS pinned toolchain, not the one the
 # setup action installs.
-channel = "1.97.1"
+channel = "1.100.0"
 # REQUIRED: without these, rustup auto-installs the pinned toolchain with the
 # runner's minimal profile and both gate steps fail on every platform.
 components = ["rustfmt", "clippy"]
