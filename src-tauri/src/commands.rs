@@ -296,7 +296,7 @@ pub async fn scan_installers(app: AppHandle, full: bool) -> CmdResult<ScanOutcom
         let (paths, db) = open_library(&config)?;
         let emit = |done: usize, total: usize| {
             // Small scans chatter needlessly; report every few entries.
-            if total == 0 || done == total || done % 4 == 0 {
+            if total == 0 || done == total || done.is_multiple_of(4) {
                 let _ = app.emit("scan-progress", ScanProgress { done, total });
             }
         };
