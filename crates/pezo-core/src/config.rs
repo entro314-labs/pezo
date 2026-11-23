@@ -146,6 +146,25 @@ pub fn fs_info(path: &std::path::Path) -> Option<FsInfo> {
     })
 }
 
+fn unescape_mount(s: &str) -> PathBuf {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let code: String = chars.by_ref().take(3).collect();
+            if let Ok(n) = u8::from_str_radix(&code, 8) {
+                out.push(n as char);
+                continue;
+            }
+            out.push(c);
+            out.push_str(&code);
+        } else {
+            out.push(c);
+        }
+    }
+    PathBuf::from(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,23 +183,4 @@ mod tests {
         );
         assert_eq!(unescape_mount("/plain"), PathBuf::from("/plain"));
     }
-}
-
-fn unescape_mount(s: &str) -> PathBuf {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            let code: String = chars.by_ref().take(3).collect();
-            if let Ok(n) = u8::from_str_radix(&code, 8) {
-                out.push(n as char);
-                continue;
-            }
-            out.push(c);
-            out.push_str(&code);
-        } else {
-            out.push(c);
-        }
-    }
-    PathBuf::from(out)
 }
