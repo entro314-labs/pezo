@@ -169,6 +169,8 @@ fn unescape_mount(s: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    // fs_info reads /proc/self/mounts, which only Linux has.
+    #[cfg(target_os = "linux")]
     #[test]
     fn fs_info_resolves_root() {
         let info = fs_info(std::path::Path::new("/")).expect("root fs");
