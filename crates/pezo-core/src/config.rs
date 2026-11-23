@@ -123,8 +123,7 @@ pub fn fs_info(path: &std::path::Path) -> Option<FsInfo> {
     let mut best: Option<(usize, String)> = None;
     for line in mounts.lines() {
         let mut fields = line.split_whitespace();
-        let (Some(_dev), Some(mount), Some(fstype)) =
-            (fields.next(), fields.next(), fields.next())
+        let (Some(_dev), Some(mount), Some(fstype)) = (fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
@@ -141,7 +140,10 @@ pub fn fs_info(path: &std::path::Path) -> Option<FsInfo> {
         fstype.as_str(),
         "ntfs" | "ntfs3" | "fuseblk" | "exfat" | "vfat" | "msdos"
     );
-    Some(FsInfo { fstype, problematic })
+    Some(FsInfo {
+        fstype,
+        problematic,
+    })
 }
 
 #[cfg(test)]

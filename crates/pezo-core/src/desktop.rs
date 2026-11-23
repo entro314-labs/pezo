@@ -9,9 +9,7 @@ use crate::model::Game;
 fn applications_dir() -> Result<PathBuf> {
     let base = env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
-        })
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
         .ok_or_else(|| CoreError::Config("neither XDG_DATA_HOME nor HOME is set".into()))?;
     Ok(base.join("applications"))
 }

@@ -21,9 +21,7 @@ fn strip_multipart_suffix(name: &str) -> Option<&str> {
     }
     let (stem, digits) = lower.rsplit_once('.')?;
     let (base, ext) = stem.rsplit_once('.')?;
-    if digits.len() == 3
-        && digits.chars().all(|c| c.is_ascii_digit())
-        && STRIP_EXTS.contains(&ext)
+    if digits.len() == 3 && digits.chars().all(|c| c.is_ascii_digit()) && STRIP_EXTS.contains(&ext)
     {
         return Some(&name[..base.len()]);
     }
@@ -209,10 +207,15 @@ mod tests {
     #[test]
     fn strips_multipart_suffixes() {
         assert_eq!(
-            humanize(&PathBuf::from("Echo.Point.Nova.v1.41-VoxanPortable.part1.rar")),
+            humanize(&PathBuf::from(
+                "Echo.Point.Nova.v1.41-VoxanPortable.part1.rar"
+            )),
             "Echo Point Nova Voxanportable"
         );
-        assert_eq!(humanize(&PathBuf::from("GhostExile085.7z.001")), "Ghostexile085");
+        assert_eq!(
+            humanize(&PathBuf::from("GhostExile085.7z.001")),
+            "Ghostexile085"
+        );
         assert_eq!(humanize(&PathBuf::from("W.Skies.175.zip.001")), "W Skies");
     }
 
