@@ -37,6 +37,10 @@ The release pipeline refuses to release a tag `vX.Y.Z` without a matching
   doesn't exist yet (UltraTears before its `setup.bat` has run) is refused
   with a hint instead of registering a build tool as the game.
 
+### Changed
+
+- The macOS app is signed with a Developer ID certificate and notarized by Apple, so it opens without the "unidentified developer" warning.
+
 ### Fixed
 
 - GOG installs failed immediately: innoextract was called with a
