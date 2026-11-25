@@ -25,12 +25,12 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.5",
     "@tauri-apps/cli": "^2.12.6",
-    "@types/react": "^19.3.0",
+    "@types/react": "^19.3.2",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
     "oxlint": "^1.95.0",
     "tailwindcss": "^4.3.5",
-    "typescript": "^7.1.0-dev.20261121.1",
+    "typescript": "^7.1.0-dev.20261125.1",
     "vite": "^8.3.8"
   }
 }
