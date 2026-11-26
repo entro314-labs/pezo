@@ -83,7 +83,7 @@ jobs:
   # fail a release that already shipped.
   flatpak:
     needs: release
-    uses: entro314-labs/tauri-release-kit/.github/workflows/flatpak.yml@fee0d83d27110a46c01dc918bd7614dc7ac89dea
+    uses: entro314-labs/tauri-release-kit/.github/workflows/flatpak.yml@a1465094f72c27388e87dc70824b15c50394bca7
     permissions:
       contents: write
     with:
