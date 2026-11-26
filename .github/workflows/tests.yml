@@ -17,7 +17,7 @@ jobs:
   rust:
     # Pinned, not @main: same policy as release.yml — an external workflow ref
     # that anyone can move should never be trusted by CI here.
-    uses: entro314-labs/tauri-release-kit/.github/workflows/rust-checks.yml@dc7c518ffed1e208289aac727c4fad1c699fa845
+    uses: entro314-labs/tauri-release-kit/.github/workflows/rust-checks.yml@f6f09f50b97f4bb2541c7600f6ba813ee6a50cc7
     with:
       project_path: '.'
       # Repo-root cargo workspace (src-tauri is a member).
